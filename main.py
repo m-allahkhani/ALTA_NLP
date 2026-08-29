@@ -38,6 +38,8 @@ from multi_task_loss import MultiTaskLoss
 
 SEED = 42
 
+train_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//train.csv" 
+test_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//valid.csv" 
 MODEL_NAME = (
     "microsoft/deberta-v3-base"
 )
@@ -362,9 +364,8 @@ def evaluate(
 
 def main():
 
-    CSV_PATH = f"E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\train.csv" 
     df = pd.read_csv(
-       CSV_PATH
+       train_path
     )
 
     tokenizer = (
