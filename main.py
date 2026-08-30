@@ -84,11 +84,33 @@ WARMUP_RATIO = 0.1
 
 # NUM_FOLDS = 2
 
-DEVICE = (
+DEVICE = torch.device(
     "cuda"
     if torch.cuda.is_available()
     else "cpu"
 )
+
+NUM_GPUS = (
+    torch.cuda.device_count()
+    if torch.cuda.is_available()
+    else 0
+)
+
+print("\n" + "=" * 60)
+print("DEVICE CONFIGURATION")
+print("=" * 60)
+
+print(f"Device: {DEVICE}")
+print(f"GPU count: {NUM_GPUS}")
+
+if NUM_GPUS > 0:
+    for i in range(NUM_GPUS):
+        print(
+            f"GPU {i}: "
+            f"{torch.cuda.get_device_name(i)}"
+        )
+
+print("=" * 60)
 
 
 # ==================================================
@@ -575,17 +597,27 @@ def main(args):
         )
 
        
-        model = (
-            DialectAwareMultiTaskDeBERTa(
-                model_name=MODEL_NAME,
-                lora_r=8,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                dropout=0.1
-            )
+        model = DialectAwareMultiTaskDeBERTa(
+            model_name=MODEL_NAME,
+            lora_r=8,
+            lora_alpha=16,
+            lora_dropout=0.05,
+            dropout=0.1
         )
 
         model.to(DEVICE)
+
+        if NUM_GPUS > 1:
+            print(
+                f"Using DataParallel across "
+                f"{NUM_GPUS} GPUs"
+            )
+
+            model = nn.DataParallel(model)
+        else:
+            print(
+                f"Using single device: {DEVICE}"
+            )
 
         
         sentiment_weights =  compute_class_weights( train_df["sentiment"] ).to(DEVICE)
@@ -692,24 +724,21 @@ def main(args):
                     f"{fold + 1}.pt"
                 )
 
+                if isinstance(model, nn.DataParallel):
+                    model_state_dict = model.module.state_dict()
+                else:
+                    model_state_dict = model.state_dict()
+
                 torch.save(
                     {
-                        "model_state_dict":
-                            model.state_dict(),
-
-                        "best_score":
-                            best_score,
-
-                        "fold":
-                            fold + 1
+                        "model_state_dict": model_state_dict,
+                        "best_score": best_score,
+                        "fold": fold + 1
                     },
                     checkpoint_path
                 )
 
-                print(
-                    f"Saved best model "
-                    f"→ {checkpoint_path}"
-                )
+                print(f"Saved best model → {checkpoint_path}")
 
         fold_scores.append(
             best_score
