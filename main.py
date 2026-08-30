@@ -59,9 +59,10 @@ def parse_args():
 
 SEED = 42
 
-train_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\train.csv"
-test_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\valid.csv" 
-
+# train_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\train.csv"
+# test_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\valid.csv" 
+train_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//train.csv" 
+test_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//valid.csv" 
 
 MODEL_NAME = (
     "microsoft/deberta-v3-base"
