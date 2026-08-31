@@ -3,7 +3,7 @@ import random
 
 import numpy as np
 import pandas as pd
-
+import math
 import torch
 import torch.nn as nn
 
@@ -61,8 +61,10 @@ SEED = 42
 
 # train_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\train.csv"
 # test_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\valid.csv" 
-train_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//train.csv" 
-test_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//valid.csv" 
+# train_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//train.csv" 
+# test_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//valid.csv" 
+train_path = f"train.csv" 
+test_path = f"valid.csv" 
 
 MODEL_NAME = (
     "microsoft/deberta-v3-base"
@@ -81,6 +83,9 @@ LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.01
 
 WARMUP_RATIO = 0.1
+
+EARLY_STOPPING_PATIENCE = 2 
+MIN_DELTA = 0.001
 
 # NUM_FOLDS = 2
 
@@ -155,8 +160,13 @@ def compute_class_weights(labels):
     )
 
 
-
-def train_one_epoch(model,dataloader,optimizer,scheduler,loss_function):
+def train_one_epoch(
+    model,
+    dataloader,
+    optimizer,
+    scheduler,
+    loss_function
+):
 
     model.train()
 
@@ -164,58 +174,91 @@ def train_one_epoch(model,dataloader,optimizer,scheduler,loss_function):
 
     optimizer.zero_grad()
 
-    for step, batch in enumerate(
-        dataloader
-    ):
+    for step, batch in enumerate(dataloader):
 
         input_ids = batch["input_ids"].to(DEVICE)
-
         attention_mask = batch["attention_mask"].to(DEVICE)
-
         variety_ids = batch["variety_ids"].to(DEVICE)
 
-        sentiment_labels = batch["sentiment_labels"].to(DEVICE)
+        sentiment_labels = (
+            batch["sentiment_labels"].to(DEVICE)
+        )
 
-        sarcasm_labels = batch["sarcasm_labels"].to(DEVICE)
+        sarcasm_labels = (
+            batch["sarcasm_labels"].to(DEVICE)
+        )
 
-        outputs = model(input_ids=input_ids,attention_mask=attention_mask,variety_ids=variety_ids)
+ 
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            variety_ids=variety_ids
+        )
+
+     
 
         losses = loss_function(
-            sentiment_logits= outputs["sentiment_logits"],
-            sentiment_labels= sentiment_labels,
-            sarcasm_logits= outputs["sarcasm_logits"],
-            sarcasm_labels= sarcasm_labels)
+            sentiment_logits=outputs["sentiment_logits"],
+            sentiment_labels=sentiment_labels,
+            sarcasm_logits=outputs["sarcasm_logits"],
+            sarcasm_labels=sarcasm_labels
+        )
 
-        loss = losses["loss"]/GRADIENT_ACCUMULATION_STEPS
         
+
+        loss = (
+            losses["loss"]
+            /
+            GRADIENT_ACCUMULATION_STEPS
+        )
 
         loss.backward()
 
-        if ((step + 1) % GRADIENT_ACCUMULATION_STEPS== 0):
+        
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if (
+            (step + 1)
+            %
+            GRADIENT_ACCUMULATION_STEPS
+            == 0
+        ):
+
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                1.0
+            )
 
             optimizer.step()
-
             scheduler.step()
-
             optimizer.zero_grad()
 
-        total_loss += (loss.item() *GRADIENT_ACCUMULATION_STEPS)
+        total_loss += (
+            loss.item()
+            *
+            GRADIENT_ACCUMULATION_STEPS
+        )
 
     
 
-    if (len(dataloader) % GRADIENT_ACCUMULATION_STEPS != 0):
+    if (
+        len(dataloader)
+        %
+        GRADIENT_ACCUMULATION_STEPS
+        != 0
+    ):
 
-        torch.nn.utils.clip_grad_norm_( model.parameters(),  1.0)
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            1.0
+        )
 
         optimizer.step()
-
         scheduler.step()
-
         optimizer.zero_grad()
 
-    return (total_loss / len(dataloader))
+    return total_loss / len(dataloader)
+
 
 
 @torch.no_grad()
@@ -292,17 +335,7 @@ def predict_ensemble(
     models,
     dataloader
 ):
-    """
-    Run all fold models and average their logits.
-
-    Returns:
-        varieties
-        sentiment_labels
-        sentiment_predictions
-        sarcasm_labels
-        sarcasm_predictions
-    """
-
+    
     for model in models:
         model.eval()
 
@@ -314,10 +347,7 @@ def predict_ensemble(
     sentiment_logits_all_models = []
     sarcasm_logits_all_models = []
 
-    # ----------------------------------------------
-    # Run every model
-    # ----------------------------------------------
-
+    
     for model_index, model in enumerate(models):
 
         sentiment_logits_model = []
@@ -398,7 +428,6 @@ def predict_ensemble(
             sarcasm_logits_model
         )
 
-        # These are identical for every model.
         if model_index == 0:
 
             sentiment_labels_all = (
@@ -411,9 +440,7 @@ def predict_ensemble(
 
             varieties = varieties_model
 
-    # ==================================================
-    # Average logits
-    # ==================================================
+ 
 
     sentiment_logits_ensemble = torch.stack(
         sentiment_logits_all_models,
@@ -425,9 +452,6 @@ def predict_ensemble(
         dim=0
     ).mean(dim=0)
 
-    # ==================================================
-    # Final predictions
-    # ==================================================
 
     sentiment_predictions = torch.argmax(
         sentiment_logits_ensemble,
@@ -644,7 +668,8 @@ def main(args):
         )
 
         
-        steps_per_epoch = (len(train_loader) // GRADIENT_ACCUMULATION_STEPS)
+        # steps_per_epoch = (len(train_loader) // GRADIENT_ACCUMULATION_STEPS)
+        steps_per_epoch = math.ceil(len(train_loader) / GRADIENT_ACCUMULATION_STEPS)
 
      
         steps_per_epoch = max(1, steps_per_epoch)
@@ -662,9 +687,20 @@ def main(args):
 
         best_score = -1.0
 
+        best_epoch = 0
+
+        epochs_without_improvement = 0
+
+
         for epoch in range(NUM_EPOCHS):
 
-            print( f"\nEpoch {epoch + 1} / {NUM_EPOCHS}")
+            print(
+                f"\nEpoch {epoch + 1} / {NUM_EPOCHS}"
+            )
+
+            # ----------------------------------------------
+            # Training
+            # ----------------------------------------------
 
             train_loss = train_one_epoch(
                 model=model,
@@ -674,49 +710,69 @@ def main(args):
                 loss_function=loss_function
             )
 
+            # ----------------------------------------------
+            # Validation
+            # ----------------------------------------------
+
             results = evaluate(
                 model=model,
                 dataloader=val_loader,
                 loss_function=loss_function
             )
 
-            print(f"Train Loss: {train_loss:.4f}")
+            print(
+                f"Train Loss: {train_loss:.4f}"
+            )
 
-            print(f"Validation Loss: {results['loss']:.4f}")
+            print(
+                f"Validation Loss: "
+                f"{results['loss']:.4f}"
+            )
+
+            sentiment_f1 = (
+                results["sentiment"]["macro_f1"]
+            )
+
+            sarcasm_f1 = (
+                results["sarcasm"]["macro_f1"]
+            )
 
             print(
                 "Sentiment Macro F1: "
-                f"{results['sentiment']['macro_f1']:.4f}")
+                f"{sentiment_f1:.4f}"
+            )
 
             print(
                 "Sarcasm Macro F1: "
-                f"{results['sarcasm']['macro_f1']:.4f}")
-
-            
-
-            combined_score = (
-                0.5
-                *
-                results[
-                    "sentiment"
-                ][
-                    "macro_f1"
-                ]
-                +
-                0.5
-                *
-                results[
-                    "sarcasm"
-                ][
-                    "macro_f1"
-                ]
+                f"{sarcasm_f1:.4f}"
             )
 
-            if combined_score > best_score:
+            # ----------------------------------------------
+            # Combined validation score
+            # ----------------------------------------------
 
-                best_score = (
-                    combined_score
-                )
+            combined_score = (
+                0.5 * sentiment_f1
+                +
+                0.5 * sarcasm_f1
+            )
+
+            print(
+                f"Combined Score: "
+                f"{combined_score:.4f}"
+            )
+
+            # ----------------------------------------------
+            # Check improvement
+            # ----------------------------------------------
+
+            if combined_score > best_score + MIN_DELTA:
+
+                best_score = combined_score
+
+                best_epoch = epoch + 1
+
+                epochs_without_improvement = 0
 
                 checkpoint_path = (
                     f"checkpoints/"
@@ -724,21 +780,86 @@ def main(args):
                     f"{fold + 1}.pt"
                 )
 
+                # ------------------------------------------
+                # Save underlying model if DataParallel
+                # ------------------------------------------
+
                 if isinstance(model, nn.DataParallel):
-                    model_state_dict = model.module.state_dict()
+
+                    model_state_dict = (
+                        model.module.state_dict()
+                    )
+
                 else:
-                    model_state_dict = model.state_dict()
+
+                    model_state_dict = (
+                        model.state_dict()
+                    )
 
                 torch.save(
                     {
-                        "model_state_dict": model_state_dict,
-                        "best_score": best_score,
-                        "fold": fold + 1
+                        "model_state_dict":
+                            model_state_dict,
+
+                        "best_score":
+                            best_score,
+
+                        "best_epoch":
+                            best_epoch,
+
+                        "fold":
+                            fold + 1
                     },
                     checkpoint_path
                 )
 
-                print(f"Saved best model → {checkpoint_path}")
+                print(
+                    f"✓ New best model"
+                )
+
+                print(
+                    f"✓ Saved best model "
+                    f"→ {checkpoint_path}"
+                )
+
+            else:
+
+                epochs_without_improvement += 1
+
+                print(
+                    f"No improvement for "
+                    f"{epochs_without_improvement} "
+                    f"epoch(s)."
+                )
+
+            # ----------------------------------------------
+            # Early stopping
+            # ----------------------------------------------
+
+            if (
+                epochs_without_improvement
+                >= EARLY_STOPPING_PATIENCE
+            ):
+
+                print(
+                    "\nEarly stopping triggered."
+                )
+
+                print(
+                    f"Best epoch: {best_epoch}"
+                )
+
+                print(
+                    f"Best validation score: "
+                    f"{best_score:.4f}"
+                )
+
+                break
+
+
+        # ==================================================
+        # FOLD RESULT
+        # ==================================================
 
         fold_scores.append(
             best_score
@@ -749,15 +870,21 @@ def main(args):
             f"{best_score:.4f}"
         )
 
-        # ----------------------------------------------
-        # Free fold model
-        # ----------------------------------------------
+        print(
+            f"Best Epoch: "
+            f"{best_epoch}"
+        )
+
+
+        # ==================================================
+        # FREE FOLD MODEL
+        # ==================================================
 
         del model
 
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
+            torch.cuda.empty_cache()
 
     print(
         "\n"
@@ -914,6 +1041,9 @@ def main(args):
         model.load_state_dict(
             checkpoint["model_state_dict"]
         )
+        
+        if NUM_GPUS > 1:
+            model = nn.DataParallel(model)
 
         model.eval()
 
@@ -1087,17 +1217,7 @@ def main(args):
         )
     )
 
-    print(
-        "=" * 60
-    )
-
-    print(
-        "\nFirst 5 predictions:"
-    )
-
-    print(
-        answer_df.head()
-    )
+ 
 
 
     
