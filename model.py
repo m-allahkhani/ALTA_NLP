@@ -220,13 +220,10 @@ class DialectAwareMultiTaskDeBERTa(nn.Module):
             device=device
         )
 
-        # ---------------------------------------------
-        # AU examples
-        #
         # variety_ids:
         # 0 = en-AU
         # 1 = en-UK
-        # ---------------------------------------------
+     
 
         au_indices = (
             variety_ids == 0
