@@ -84,8 +84,8 @@ WEIGHT_DECAY = 0.01
 
 WARMUP_RATIO = 0.1
 
-EARLY_STOPPING_PATIENCE = 2 
-MIN_DELTA = 0.001
+EARLY_STOPPING_PATIENCE = 3 
+MIN_DELTA = 0.0005
 
 # NUM_FOLDS = 2
 
@@ -159,13 +159,16 @@ def compute_class_weights(labels):
         dtype=torch.float
     )
 
-
 def train_one_epoch(
     model,
     dataloader,
     optimizer,
     scheduler,
-    loss_function
+    sentiment_loss,
+    au_sarcasm_loss,
+    uk_sarcasm_loss,
+    sentiment_weight=0.4,
+    sarcasm_weight=0.6
 ):
 
     model.train()
@@ -177,18 +180,22 @@ def train_one_epoch(
     for step, batch in enumerate(dataloader):
 
         input_ids = batch["input_ids"].to(DEVICE)
+
         attention_mask = batch["attention_mask"].to(DEVICE)
+
         variety_ids = batch["variety_ids"].to(DEVICE)
 
-        sentiment_labels = (
-            batch["sentiment_labels"].to(DEVICE)
-        )
+        sentiment_labels = batch[
+            "sentiment_labels"
+        ].to(DEVICE)
 
-        sarcasm_labels = (
-            batch["sarcasm_labels"].to(DEVICE)
-        )
+        sarcasm_labels = batch[
+            "sarcasm_labels"
+        ].to(DEVICE)
 
- 
+        # ==================================================
+        # Forward pass
+        # ==================================================
 
         outputs = model(
             input_ids=input_ids,
@@ -196,26 +203,120 @@ def train_one_epoch(
             variety_ids=variety_ids
         )
 
-     
+        sentiment_logits = outputs[
+            "sentiment_logits"
+        ]
 
-        losses = loss_function(
-            sentiment_logits=outputs["sentiment_logits"],
-            sentiment_labels=sentiment_labels,
-            sarcasm_logits=outputs["sarcasm_logits"],
-            sarcasm_labels=sarcasm_labels
+        sarcasm_logits = outputs[
+            "sarcasm_logits"
+        ]
+
+        # ==================================================
+        # Sentiment loss
+        # ==================================================
+
+        sentiment_loss_value = sentiment_loss(
+            sentiment_logits,
+            sentiment_labels
         )
 
-        
+        # ==================================================
+        # Dialect-specific sarcasm losses
+        # ==================================================
+
+        au_mask = (
+            variety_ids == 0
+        )
+
+        uk_mask = (
+            variety_ids == 1
+        )
+
+        sarcasm_loss_values = []
+
+        # --------------------------------------------------
+        # AU sarcasm
+        # --------------------------------------------------
+
+        if au_mask.any():
+
+            au_loss = au_sarcasm_loss(
+                sarcasm_logits[au_mask],
+                sarcasm_labels[au_mask]
+            )
+
+            sarcasm_loss_values.append(
+                au_loss
+            )
+
+        # --------------------------------------------------
+        # UK sarcasm
+        # --------------------------------------------------
+
+        if uk_mask.any():
+
+            uk_loss = uk_sarcasm_loss(
+                sarcasm_logits[uk_mask],
+                sarcasm_labels[uk_mask]
+            )
+
+            sarcasm_loss_values.append(
+                uk_loss
+            )
+
+        # ==================================================
+        # Equal dialect contribution
+        # ==================================================
+
+        if len(sarcasm_loss_values) == 2:
+
+            sarcasm_loss_value = (
+                sarcasm_loss_values[0]
+                +
+                sarcasm_loss_values[1]
+            ) / 2.0
+
+        elif len(sarcasm_loss_values) == 1:
+
+            # Batch contains only one dialect.
+            sarcasm_loss_value = (
+                sarcasm_loss_values[0]
+            )
+
+        else:
+
+            raise RuntimeError(
+                "Batch contains neither en-AU "
+                "nor en-UK samples."
+            )
+
+        # ==================================================
+        # Multi-task loss
+        # ==================================================
+
+        total_batch_loss = (
+            sentiment_weight *
+            sentiment_loss_value
+            +
+            sarcasm_weight *
+            sarcasm_loss_value
+        )
+
+        # ==================================================
+        # Gradient accumulation
+        # ==================================================
 
         loss = (
-            losses["loss"]
+            total_batch_loss
             /
             GRADIENT_ACCUMULATION_STEPS
         )
 
         loss.backward()
 
-        
+        # ==================================================
+        # Optimizer step
+        # ==================================================
 
         if (
             (step + 1)
@@ -230,16 +331,17 @@ def train_one_epoch(
             )
 
             optimizer.step()
+
             scheduler.step()
+
             optimizer.zero_grad()
 
-        total_loss += (
-            loss.item()
-            *
-            GRADIENT_ACCUMULATION_STEPS
-        )
+        # Track unscaled loss
+        total_loss += total_batch_loss.item()
 
-    
+    # ==================================================
+    # Handle remaining accumulated gradients
+    # ==================================================
 
     if (
         len(dataloader)
@@ -254,18 +356,24 @@ def train_one_epoch(
         )
 
         optimizer.step()
+
         scheduler.step()
+
         optimizer.zero_grad()
 
-    return total_loss / len(dataloader)
-
-
-
+    return (
+        total_loss /
+        len(dataloader)
+    )
 @torch.no_grad()
 def evaluate(
     model,
     dataloader,
-    loss_function
+    sentiment_loss,
+    au_sarcasm_loss,
+    uk_sarcasm_loss,
+    sentiment_weight=0.4,
+    sarcasm_weight=0.6
 ):
     model.eval()
 
@@ -294,7 +402,9 @@ def evaluate(
     for batch in dataloader:
 
         input_ids = batch["input_ids"].to(DEVICE)
+
         attention_mask = batch["attention_mask"].to(DEVICE)
+
         variety_ids = batch["variety_ids"].to(DEVICE)
 
         sentiment_labels = batch[
@@ -315,55 +425,150 @@ def evaluate(
             variety_ids=variety_ids
         )
 
-        # ----------------------------------------------
-        # Loss
-        # ----------------------------------------------
+        sentiment_logits = outputs[
+            "sentiment_logits"
+        ]
 
-        losses = loss_function(
-            sentiment_logits=outputs["sentiment_logits"],
-            sentiment_labels=sentiment_labels,
-            sarcasm_logits=outputs["sarcasm_logits"],
-            sarcasm_labels=sarcasm_labels
+        sarcasm_logits = outputs[
+            "sarcasm_logits"
+        ]
+
+        # ==============================================
+        # Sentiment loss
+        # ==============================================
+
+        sentiment_loss_value = sentiment_loss(
+            sentiment_logits,
+            sentiment_labels
         )
 
-        total_loss += losses["loss"].item()
+        # ==============================================
+        # Dialect-specific sarcasm losses
+        # ==============================================
 
-        # ----------------------------------------------
+        au_mask = (
+            variety_ids == 0
+        )
+
+        uk_mask = (
+            variety_ids == 1
+        )
+
+        sarcasm_loss_values = []
+
+        # --------------------------------------------------
+        # en-AU sarcasm loss
+        # --------------------------------------------------
+
+        if au_mask.any():
+
+            au_loss = au_sarcasm_loss(
+                sarcasm_logits[au_mask],
+                sarcasm_labels[au_mask]
+            )
+
+            sarcasm_loss_values.append(
+                au_loss
+            )
+
+        # --------------------------------------------------
+        # en-UK sarcasm loss
+        # --------------------------------------------------
+
+        if uk_mask.any():
+
+            uk_loss = uk_sarcasm_loss(
+                sarcasm_logits[uk_mask],
+                sarcasm_labels[uk_mask]
+            )
+
+            sarcasm_loss_values.append(
+                uk_loss
+            )
+
+        # --------------------------------------------------
+        # Equal AU / UK contribution
+        # --------------------------------------------------
+
+        if len(sarcasm_loss_values) == 2:
+
+            sarcasm_loss_value = (
+                sarcasm_loss_values[0]
+                +
+                sarcasm_loss_values[1]
+            ) / 2.0
+
+        elif len(sarcasm_loss_values) == 1:
+
+            sarcasm_loss_value = (
+                sarcasm_loss_values[0]
+            )
+
+        else:
+
+            raise RuntimeError(
+                "Batch contains neither en-AU "
+                "nor en-UK samples."
+            )
+
+        # ==============================================
+        # Multi-task validation loss
+        # ==============================================
+
+        total_batch_loss = (
+            sentiment_weight *
+            sentiment_loss_value
+            +
+            sarcasm_weight *
+            sarcasm_loss_value
+        )
+
+        total_loss += (
+            total_batch_loss.item()
+        )
+
+        # ==============================================
         # Predictions
-        # ----------------------------------------------
+        # ==============================================
 
         sentiment_predictions = torch.argmax(
-            outputs["sentiment_logits"],
+            sentiment_logits,
             dim=1
         )
 
         sarcasm_predictions = torch.argmax(
-            outputs["sarcasm_logits"],
+            sarcasm_logits,
             dim=1
         )
 
         # Move to CPU / NumPy
-        variety_ids_cpu = variety_ids.cpu().numpy()
+        variety_ids_cpu = (
+            variety_ids.cpu().numpy()
+        )
 
-        sentiment_labels_cpu = sentiment_labels.cpu().numpy()
-        sentiment_predictions_cpu = sentiment_predictions.cpu().numpy()
+        sentiment_labels_cpu = (
+            sentiment_labels.cpu().numpy()
+        )
 
-        sarcasm_labels_cpu = sarcasm_labels.cpu().numpy()
-        sarcasm_predictions_cpu = sarcasm_predictions.cpu().numpy()
+        sentiment_predictions_cpu = (
+            sentiment_predictions.cpu().numpy()
+        )
 
-        # --------------------------------------------------
-        # Separate AU and UK samples
-        #
-        # IMPORTANT:
-        # This assumes:
-        #   variety_id == 0 -> en-AU
-        #   variety_id == 1 -> en-UK
-        #
-        # If your dataset.py uses the opposite mapping,
-        # swap these two conditions.
-        # --------------------------------------------------
+        sarcasm_labels_cpu = (
+            sarcasm_labels.cpu().numpy()
+        )
 
-        for i in range(len(variety_ids_cpu)):
+        sarcasm_predictions_cpu = (
+            sarcasm_predictions.cpu().numpy()
+        )
+
+        # ==============================================
+        # Separate AU / UK predictions
+        # ==============================================
+
+        for i in range(
+            len(variety_ids_cpu)
+        ):
 
             variety_id = variety_ids_cpu[i]
 
@@ -435,15 +640,25 @@ def evaluate(
         sarcasm_predictions_uk
     )
 
-    # --------------------------------------------------
+    # ==================================================
     # Extract Macro F1
-    # --------------------------------------------------
+    # ==================================================
 
-    sentiment_en_au = sentiment_au_metrics["macro_f1"]
-    sentiment_en_uk = sentiment_uk_metrics["macro_f1"]
+    sentiment_en_au = (
+        sentiment_au_metrics["macro_f1"]
+    )
 
-    sarcasm_en_au = sarcasm_au_metrics["macro_f1"]
-    sarcasm_en_uk = sarcasm_uk_metrics["macro_f1"]
+    sentiment_en_uk = (
+        sentiment_uk_metrics["macro_f1"]
+    )
+
+    sarcasm_en_au = (
+        sarcasm_au_metrics["macro_f1"]
+    )
+
+    sarcasm_en_uk = (
+        sarcasm_uk_metrics["macro_f1"]
+    )
 
     # ==================================================
     # OFFICIAL ALTA COMPETITION SCORE
@@ -465,7 +680,7 @@ def evaluate(
     ) / 2.0
 
     # ==================================================
-    # Return everything
+    # Return results
     # ==================================================
 
     return {
@@ -481,8 +696,6 @@ def evaluate(
 
             "en-UK": sentiment_en_uk,
 
-            # Pooled Macro F1, useful for monitoring
-            # but NOT used for checkpoint selection.
             "macro_f1": (
                 sentiment_en_au +
                 sentiment_en_uk
@@ -495,24 +708,18 @@ def evaluate(
 
             "en-UK": sarcasm_en_uk,
 
-            # Pooled-by-dialect average, useful for monitoring
-            # but NOT used for checkpoint selection.
             "macro_f1": (
                 sarcasm_en_au +
                 sarcasm_en_uk
             ) / 2.0
         },
 
-        # These are the actual task scores used
-        # by the ALTA competition.
         "sentiment_score": sentiment_score,
 
         "sarcasm_score": sarcasm_score,
 
-        # This MUST be used for best-checkpoint selection.
         "official_score": official_score
     }
-
 @torch.no_grad()
 def predict_ensemble(
     models,
@@ -827,22 +1034,75 @@ def main(args):
             )
 
         
-        sentiment_weights =  compute_class_weights( train_df["sentiment"] ).to(DEVICE)
 
-        sarcasm_weights = compute_class_weights( train_df["sarcasm"]).to(DEVICE) 
+        # ==================================================
+        # Sentiment loss
+        # ==================================================
 
-        sentiment_loss = nn.CrossEntropyLoss(weight=sentiment_weights )
+        sentiment_weights = compute_class_weights(
+            train_df["sentiment"]
+        ).to(DEVICE)
 
-        sarcasm_loss = FocalLoss(alpha=sarcasm_weights,gamma=2.0)
+        sentiment_loss = nn.CrossEntropyLoss(
+            weight=sentiment_weights
+        )
 
-        loss_function =  MultiTaskLoss(
-                sentiment_loss=sentiment_loss,
-                sarcasm_loss=sarcasm_loss,
-                sentiment_weight=0.4,
-                sarcasm_weight=0.6
-            )
+        # ==================================================
+        # Separate AU / UK sarcasm data
+        # ==================================================
+
+        au_train_df = train_df[
+            train_df["variety"] == "en-AU"
+        ]
+
+        uk_train_df = train_df[
+            train_df["variety"] == "en-UK"
+        ]
+
+        # ==================================================
+        # Dialect-specific sarcasm weights
+        # ==================================================
+
+        au_sarcasm_weights = compute_class_weights(
+            au_train_df["sarcasm"]
+        ).to(DEVICE)
+
+        uk_sarcasm_weights = compute_class_weights(
+            uk_train_df["sarcasm"]
+        ).to(DEVICE)
+
+        print("\nSarcasm class weights:")
+
+        print(
+            f"en-AU: "
+            f"negative={au_sarcasm_weights[0].item():.4f}, "
+            f"positive={au_sarcasm_weights[1].item():.4f}"
+        )
+
+        print(
+            f"en-UK: "
+            f"negative={uk_sarcasm_weights[0].item():.4f}, "
+            f"positive={uk_sarcasm_weights[1].item():.4f}"
+        )
+
+        # ==================================================
+        # Separate focal losses
+        # ==================================================
+
+        au_sarcasm_loss = FocalLoss(
+            alpha=au_sarcasm_weights,
+            gamma=2.0
+        )
+
+        uk_sarcasm_loss = FocalLoss(
+            alpha=uk_sarcasm_weights,
+            gamma=2.0
+        )
+
+
+
+
         
-
        
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -890,7 +1150,11 @@ def main(args):
                 dataloader=train_loader,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                loss_function=loss_function
+                sentiment_loss=sentiment_loss,
+                au_sarcasm_loss=au_sarcasm_loss,
+                uk_sarcasm_loss=uk_sarcasm_loss,
+                sentiment_weight=0.4,
+                sarcasm_weight=0.6
             )
 
             # ----------------------------------------------
@@ -900,7 +1164,11 @@ def main(args):
             results = evaluate(
                 model=model,
                 dataloader=val_loader,
-                loss_function=loss_function
+                sentiment_loss=sentiment_loss,
+                au_sarcasm_loss=au_sarcasm_loss,
+                uk_sarcasm_loss=uk_sarcasm_loss,
+                sentiment_weight=0.4,
+                sarcasm_weight=0.6
             )
             print("#########################################")
             print(f"Sentiment score:  {results['sentiment_score']:.4f}")
