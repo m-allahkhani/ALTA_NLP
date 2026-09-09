@@ -7,15 +7,44 @@ import math
 import torch
 import torch.nn as nn
 
-from torch.utils.data import DataLoader
+from torch.utils.data import (
+    DataLoader,
+    Dataset,
+    random_split
+)
+
+from transformers import (
+    AutoTokenizer,
+    AutoModel,
+    get_linear_schedule_with_warmup
+)
+
+from peft import (
+    LoraConfig,
+    TaskType,
+    get_peft_model,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict
+)
+
+from sklearn.metrics import f1_score
 
 from transformers import (
     AutoTokenizer,
     get_linear_schedule_with_warmup
 )
+import torch.nn.functional as F
 
 from sklearn.model_selection import (
     StratifiedKFold
+)
+
+from sklearn.model_selection import (
+    train_test_split
+)
+
+from sklearn.metrics import (
+    f1_score
 )
 
 from dataset import (
@@ -33,7 +62,9 @@ from metrics import (
 
 from focal_loss import FocalLoss
 from multi_task_loss import MultiTaskLoss
-
+from general_sarcasm_pretrain_model import GeneralSarcasmPretrainModel
+from rephrase_contrastive_loss import RephraseContrastiveLoss
+from ISarcasm_dataset import ISarcasmDataset
 import argparse
 
 def parse_args():
@@ -70,6 +101,44 @@ MODEL_NAME = (
     "microsoft/deberta-v3-base"
 )
 
+
+# ============================================================
+# iSarcasmEval GENERAL SARCASM PRETRAINING
+# ============================================================
+
+ISARCASM_TRAIN_PATH =  "iSarcasmEval_train.csv"
+
+
+GENERAL_ADAPTER_CHECKPOINT = (
+    "checkpoints/"
+    "isarcasm_general_lora.pt"
+)
+ISARCASM_MAX_LENGTH = 128
+
+ISARCASM_BATCH_SIZE = 4
+
+ISARCASM_GRADIENT_ACCUMULATION_STEPS = 2
+
+ISARCASM_EPOCHS = 8
+
+ISARCASM_LEARNING_RATE = 1e-5
+
+ISARCASM_WEIGHT_DECAY = 0.01
+
+ISARCASM_WARMUP_RATIO = 0.1
+
+ISARCASM_VAL_RATIO = 0.10
+
+ISARCASM_PATIENCE = 2
+
+ISARCASM_GAMMA = 2.0
+
+ISARCASM_MIN_DELTA = 0.0005
+
+USE_ISARCASM_PRETRAINING = True
+
+
+#######################################
 MAX_LENGTH = 128
 
 BATCH_SIZE = 2
@@ -365,6 +434,793 @@ def train_one_epoch(
         total_loss /
         len(dataloader)
     )
+
+from sklearn.model_selection import train_test_split
+from transformers import get_linear_schedule_with_warmup
+
+
+def pretrain_general_adapter(
+    train_csv = ISARCASM_TRAIN_PATH,
+    model_name=MODEL_NAME,
+    output_dir=GENERAL_ADAPTER_CHECKPOINT,
+    max_length=ISARCASM_MAX_LENGTH,
+    batch_size=ISARCASM_BATCH_SIZE,
+    learning_rate=ISARCASM_LEARNING_RATE,
+    weight_decay=ISARCASM_WEIGHT_DECAY,
+    num_epochs=ISARCASM_EPOCHS,
+    warmup_ratio=ISARCASM_WARMUP_RATIO,
+    gradient_accumulation_steps=ISARCASM_GRADIENT_ACCUMULATION_STEPS,
+    val_size=ISARCASM_VAL_RATIO,
+    seed=42,
+    num_workers=2,
+):
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --------------------------------------------------
+    # Reproducibility
+    # --------------------------------------------------
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # --------------------------------------------------
+    # Load data
+    # --------------------------------------------------
+
+    df = pd.read_csv(train_csv)
+
+    required_columns = [
+        "tweet",
+        "sarcastic",
+        "rephrase",
+        "sarcasm",
+    ]
+
+    missing = [
+        c for c in required_columns
+        if c not in df.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"Missing required columns: {missing}"
+        )
+
+    print(f"Total samples: {len(df)}")
+
+    print(
+        "Sarcastic distribution:\n",
+        df["sarcastic"].value_counts(dropna=False)
+    )
+
+    print(
+        "Rephrase availability:",
+        df["rephrase"].fillna("").astype(str).str.strip().ne("").sum()
+    )
+
+    print(
+        "Fine-grained sarcasm distribution:\n",
+        df["sarcasm"].value_counts(dropna=False)
+    )
+
+    # --------------------------------------------------
+    # Stratified split using MAIN sarcastic label
+    # --------------------------------------------------
+
+    train_df, val_df = train_test_split(
+        df,
+        test_size=val_size,
+        random_state=seed,
+        stratify=df["sarcastic"],
+    )
+
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
+
+    print(
+        f"Train: {len(train_df)} | "
+        f"Validation: {len(val_df)}"
+    )
+
+    # --------------------------------------------------
+    # Tokenizer
+    # --------------------------------------------------
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name
+    )
+
+    # --------------------------------------------------
+    # Dataset
+    # --------------------------------------------------
+
+    train_dataset = ISarcasmDataset(
+        train_df,
+        tokenizer,
+        max_length=max_length,
+    )
+
+    val_dataset = ISarcasmDataset(
+        val_df,
+        tokenizer,
+        max_length=max_length,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    # --------------------------------------------------
+    # Model
+    # --------------------------------------------------
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    print(f"Device: {device}")
+
+    model = GeneralSarcasmPretrainModel(
+        model_name=model_name,
+        lora_r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        dropout=0.1,
+    )
+
+    model.to(device)
+
+    model.encoder.print_trainable_parameters()
+
+    # --------------------------------------------------
+    # Binary sarcasm class weights
+    # --------------------------------------------------
+
+    binary_counts = (
+        train_df["sarcastic"]
+        .value_counts()
+        .sort_index()
+    )
+
+    n_negative = int(binary_counts.get(0, 1))
+    n_positive = int(binary_counts.get(1, 1))
+
+    # Standard inverse-frequency weighting
+    class_weights = torch.tensor(
+        [
+            1.0,
+            n_negative / max(n_positive, 1),
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    binary_loss_fn = nn.CrossEntropyLoss(
+        weight=class_weights
+    )
+
+    # --------------------------------------------------
+    # Fine-grained sarcasm weight
+    # --------------------------------------------------
+
+    fine_pos_weight = calculate_fine_sarcasm_pos_weight(
+        train_df
+    )
+
+    print(
+        f"Fine sarcasm pos_weight: "
+        f"{fine_pos_weight:.4f}"
+    )
+
+    # --------------------------------------------------
+    # Contrastive loss
+    # --------------------------------------------------
+
+    contrastive_loss_fn = RephraseContrastiveLoss(
+        temperature=0.07
+    )
+
+    # --------------------------------------------------
+    # Optimizer
+    # --------------------------------------------------
+
+    trainable_params = [
+        p for p in model.parameters()
+        if p.requires_grad
+    ]
+
+    optimizer = torch.optim.AdamW(
+        trainable_params,
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+
+    steps_per_epoch = max(
+        1,
+        (
+            len(train_loader)
+            + gradient_accumulation_steps
+            - 1
+        )
+        // gradient_accumulation_steps,
+    )
+
+    total_steps = (
+        steps_per_epoch * num_epochs
+    )
+
+    warmup_steps = int(
+        total_steps * warmup_ratio
+    )
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+
+    # --------------------------------------------------
+    # Training
+    # --------------------------------------------------
+
+    best_f1 = -1.0
+    best_epoch = -1
+
+    for epoch in range(1, num_epochs + 1):
+
+        train_metrics = pretrain_one_epoch(
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            binary_loss_fn=binary_loss_fn,
+            fine_pos_weight=fine_pos_weight,
+            contrastive_loss_fn=contrastive_loss_fn,
+            binary_weight=0.60,
+            rephrase_weight=0.25,
+            fine_weight=0.15,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
+
+        val_metrics = evaluate_isarcasm(
+            model,
+            val_loader,
+            device,
+        )
+
+        print(
+            f"\nEpoch {epoch}/{num_epochs}"
+        )
+
+        print(
+            f"Train Loss: "
+            f"{train_metrics['loss']:.4f}"
+        )
+
+        print(
+            f"  Binary: "
+            f"{train_metrics['binary_loss']:.4f}"
+        )
+
+        print(
+            f"  Rephrase: "
+            f"{train_metrics['rephrase_loss']:.4f}"
+        )
+
+        print(
+            f"  Fine sarcasm: "
+            f"{train_metrics['fine_loss']:.4f}"
+        )
+
+        print(
+            f"Validation Macro F1: "
+            f"{val_metrics['macro_f1']:.4f}"
+        )
+
+        print(
+            f"Validation Positive F1: "
+            f"{val_metrics['positive_f1']:.4f}"
+        )
+
+        print(
+            f"Validation Fine Loss: "
+            f"{val_metrics['fine_loss']:.4f}"
+        )
+
+        # --------------------------------------------------
+        # Save best adapter
+        # --------------------------------------------------
+
+        if val_metrics["macro_f1"] > best_f1:
+
+            best_f1 = val_metrics["macro_f1"]
+            best_epoch = epoch
+
+            checkpoint_path = os.path.join(
+                output_dir,
+                "best_general_adapter.pt",
+            )
+
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "best_f1": best_f1,
+                    "best_epoch": best_epoch,
+                    "model_name": model_name,
+                },
+                checkpoint_path,
+            )
+
+            print(
+                f"✓ Saved best model → "
+                f"{checkpoint_path}"
+            )
+
+    print(
+        f"\nBest validation Macro F1: "
+        f"{best_f1:.4f}"
+    )
+
+    print(
+        f"Best epoch: {best_epoch}"
+    )
+
+    return model, tokenizer
+
+import os
+import torch
+
+def load_general_adapter_weights(
+    model,
+    checkpoint_path,
+):
+    """
+    Load the pretrained iSarcasm general LoRA weights.
+
+    The checkpoint path can be either:
+
+        checkpoints/isarcasm_general_lora.pt
+            -> directory containing best_general_adapter.pt
+
+    or:
+
+        some_checkpoint.pt
+            -> direct PyTorch checkpoint file
+    """
+
+    import os
+    import torch
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint path does not exist:\n"
+            f"{checkpoint_path}"
+        )
+
+    # ============================================================
+    # If the supplied path is a directory, find the saved
+    # checkpoint inside it.
+    # ============================================================
+
+    if os.path.isdir(checkpoint_path):
+
+        candidate_paths = [
+            os.path.join(
+                checkpoint_path,
+                "best_general_adapter.pt"
+            ),
+            os.path.join(
+                checkpoint_path,
+                "best_general_adapter.pth"
+            ),
+        ]
+
+        checkpoint_file = None
+
+        for candidate in candidate_paths:
+            if os.path.isfile(candidate):
+                checkpoint_file = candidate
+                break
+
+        if checkpoint_file is None:
+            raise FileNotFoundError(
+                "The checkpoint path is a directory, but "
+                "best_general_adapter.pt was not found.\n\n"
+                f"Directory contents:\n"
+                f"{os.listdir(checkpoint_path)}"
+            )
+
+    else:
+        checkpoint_file = checkpoint_path
+
+    print(
+        f"Loading general adapter from:\n"
+        f"{checkpoint_file}"
+    )
+
+    # ============================================================
+    # Load checkpoint
+    # ============================================================
+
+    checkpoint = torch.load(
+        checkpoint_file,
+        map_location=device,
+        weights_only=False,
+    )
+
+    # ============================================================
+    # Extract state dictionary
+    # ============================================================
+
+    if isinstance(checkpoint, dict):
+
+        if "model_state_dict" in checkpoint:
+            pretrained_state = checkpoint[
+                "model_state_dict"
+            ]
+
+        elif "state_dict" in checkpoint:
+            pretrained_state = checkpoint[
+                "state_dict"
+            ]
+
+        else:
+            # Assume checkpoint itself is the state_dict
+            pretrained_state = checkpoint
+
+    else:
+        raise ValueError(
+            "Unsupported checkpoint format: "
+            f"{type(checkpoint)}"
+        )
+
+    # ============================================================
+    # Current ALTA model state
+    # ============================================================
+
+    current_state = model.state_dict()
+
+    transferred = 0
+    skipped = 0
+
+    transferred_keys = []
+    skipped_keys = []
+
+    # ============================================================
+    # Transfer only LoRA encoder weights
+    # ============================================================
+
+    for source_key, source_value in pretrained_state.items():
+
+        # We only want LoRA parameters.
+        if (
+            "lora_A" not in source_key
+            and "lora_B" not in source_key
+        ):
+            continue
+
+        matched_key = None
+
+        # --------------------------------------------------------
+        # Exact match
+        # --------------------------------------------------------
+
+        if source_key in current_state:
+            matched_key = source_key
+
+        # --------------------------------------------------------
+        # default -> general adapter name
+        # --------------------------------------------------------
+
+        if matched_key is None:
+
+            candidates = [
+                source_key.replace(
+                    ".lora_A.default.",
+                    ".lora_A.general."
+                ),
+                source_key.replace(
+                    ".lora_B.default.",
+                    ".lora_B.general."
+                ),
+            ]
+
+            for candidate in candidates:
+
+                if candidate in current_state:
+                    matched_key = candidate
+                    break
+
+        # --------------------------------------------------------
+        # More flexible matching.
+        #
+        # We compare the layer/path while ignoring the adapter
+        # name.
+        # --------------------------------------------------------
+
+        if matched_key is None:
+
+            source_normalized = source_key
+
+            source_normalized = (
+                source_normalized
+                .replace(
+                    ".lora_A.default.",
+                    ".lora_A.<ADAPTER>."
+                )
+                .replace(
+                    ".lora_B.default.",
+                    ".lora_B.<ADAPTER>."
+                )
+                .replace(
+                    ".lora_A.general.",
+                    ".lora_A.<ADAPTER>."
+                )
+                .replace(
+                    ".lora_B.general.",
+                    ".lora_B.<ADAPTER>."
+                )
+            )
+
+            source_normalized = (
+                source_normalized
+                .replace(
+                    "base_model.model.",
+                    ""
+                )
+                .replace(
+                    "base_model.",
+                    ""
+                )
+            )
+
+            for target_key in current_state.keys():
+
+                if (
+                    "lora_A" not in target_key
+                    and "lora_B" not in target_key
+                ):
+                    continue
+
+                target_normalized = target_key
+
+                target_normalized = (
+                    target_normalized
+                    .replace(
+                        ".lora_A.default.",
+                        ".lora_A.<ADAPTER>."
+                    )
+                    .replace(
+                        ".lora_B.default.",
+                        ".lora_B.<ADAPTER>."
+                    )
+                    .replace(
+                        ".lora_A.general.",
+                        ".lora_A.<ADAPTER>."
+                    )
+                    .replace(
+                        ".lora_B.general.",
+                        ".lora_B.<ADAPTER>."
+                    )
+                )
+
+                target_normalized = (
+                    target_normalized
+                    .replace(
+                        "base_model.model.",
+                        ""
+                    )
+                    .replace(
+                        "base_model.",
+                        ""
+                    )
+                )
+
+                if (
+                    source_normalized
+                    == target_normalized
+                    and current_state[target_key].shape
+                    == source_value.shape
+                ):
+                    matched_key = target_key
+                    break
+
+        # --------------------------------------------------------
+        # Transfer
+        # --------------------------------------------------------
+
+        if matched_key is not None:
+
+            current_state[matched_key] = (
+                source_value.to(
+                    device=current_state[
+                        matched_key
+                    ].device,
+                    dtype=current_state[
+                        matched_key
+                    ].dtype,
+                )
+            )
+
+            transferred += 1
+            transferred_keys.append(
+                (source_key, matched_key)
+            )
+
+        else:
+            skipped += 1
+            skipped_keys.append(source_key)
+
+    # ============================================================
+    # Load into model
+    # ============================================================
+
+    model.load_state_dict(
+        current_state,
+        strict=False,
+    )
+
+    # ============================================================
+    # Report
+    # ============================================================
+
+    print()
+    print("=" * 60)
+    print("GENERAL LoRA TRANSFER")
+    print("=" * 60)
+
+    print(
+        f"Source checkpoint : {checkpoint_file}"
+    )
+
+    print(
+        f"Transferred       : {transferred}"
+    )
+
+    print(
+        f"Skipped            : {skipped}"
+    )
+
+    print("=" * 60)
+
+    if transferred == 0:
+        raise RuntimeError(
+            "No LoRA weights were transferred.\n\n"
+            "This means the parameter names in the iSarcasm "
+            "checkpoint do not match the LoRA parameters in "
+            "the ALTA model."
+        )
+
+    print(
+        "✓ General sarcasm LoRA loaded successfully."
+    )
+
+    return model
+from sklearn.metrics import f1_score
+
+
+@torch.no_grad()
+def evaluate_isarcasm(
+    model,
+    loader,
+    device,
+):
+    model.eval()
+
+    all_targets = []
+    all_predictions = []
+
+    total_fine_loss = 0.0
+    fine_count = 0
+
+    for batch in loader:
+        tweet_input_ids = batch[
+            "tweet_input_ids"
+        ].to(device)
+
+        tweet_attention_mask = batch[
+            "tweet_attention_mask"
+        ].to(device)
+
+        labels = batch[
+            "sarcastic_label"
+        ].to(device)
+
+        fine_labels = batch[
+            "fine_sarcasm_label"
+        ].to(device)
+
+        outputs = model(
+            tweet_input_ids=tweet_input_ids,
+            tweet_attention_mask=tweet_attention_mask,
+        )
+
+        predictions = outputs[
+            "binary_logits"
+        ].argmax(dim=-1)
+
+        all_targets.extend(
+            labels.cpu().numpy().tolist()
+        )
+
+        all_predictions.extend(
+            predictions.cpu().numpy().tolist()
+        )
+
+        # Fine category metric
+        valid = fine_labels >= 0
+
+        if valid.any():
+            fine_logits = outputs[
+                "fine_logits"
+            ][valid]
+
+            fine_targets = fine_labels[
+                valid
+            ].float()
+
+            fine_loss = F.binary_cross_entropy_with_logits(
+                fine_logits,
+                fine_targets,
+            )
+
+            total_fine_loss += (
+                fine_loss.item()
+                * int(valid.sum())
+            )
+
+            fine_count += int(valid.sum())
+
+    macro_f1 = f1_score(
+        all_targets,
+        all_predictions,
+        average="macro",
+        zero_division=0,
+    )
+
+    positive_f1 = f1_score(
+        all_targets,
+        all_predictions,
+        average="binary",
+        zero_division=0,
+    )
+
+    fine_loss_avg = (
+        total_fine_loss / fine_count
+        if fine_count > 0
+        else 0.0
+    )
+
+    return {
+        "macro_f1": macro_f1,
+        "positive_f1": positive_f1,
+        "fine_loss": fine_loss_avg,
+    }
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -894,6 +1750,243 @@ def preprocess_text(text):
 
     return text
 
+def masked_binary_loss(
+    logits,
+    targets,
+    pos_weight=None,
+):
+    """
+    BCE loss while ignoring targets == -1.
+    """
+
+    valid_mask = targets >= 0
+
+    if not valid_mask.any():
+        return torch.tensor(
+            0.0,
+            device=logits.device,
+            requires_grad=True,
+        )
+
+    valid_logits = logits[valid_mask]
+    valid_targets = targets[valid_mask].float()
+
+    return F.binary_cross_entropy_with_logits(
+        valid_logits,
+        valid_targets,
+        pos_weight=pos_weight,
+    )
+def calculate_fine_sarcasm_pos_weight(df):
+    values = pd.to_numeric(
+        df["sarcasm"],
+        errors="coerce",
+    )
+
+    values = values.dropna().astype(int)
+
+    positive = int((values == 1).sum())
+    negative = int((values == 0).sum())
+
+    if positive == 0:
+        return 1.0
+
+    return negative / positive
+def pretrain_one_epoch(
+    model,
+    loader,
+    optimizer,
+    scheduler,
+    device,
+    binary_loss_fn,
+    fine_pos_weight,
+    contrastive_loss_fn,
+    binary_weight=0.60,
+    rephrase_weight=0.25,
+    fine_weight=0.15,
+    gradient_accumulation_steps=4,
+):
+    model.train()
+
+    total_loss = 0.0
+    total_binary = 0.0
+    total_rephrase = 0.0
+    total_fine = 0.0
+
+    optimizer.zero_grad(set_to_none=True)
+
+    for step, batch in enumerate(loader):
+        tweet_input_ids = batch[
+            "tweet_input_ids"
+        ].to(device)
+
+        tweet_attention_mask = batch[
+            "tweet_attention_mask"
+        ].to(device)
+
+        rephrase_input_ids = batch[
+            "rephrase_input_ids"
+        ].to(device)
+
+        rephrase_attention_mask = batch[
+            "rephrase_attention_mask"
+        ].to(device)
+
+        sarcastic_label = batch[
+            "sarcastic_label"
+        ].to(device)
+
+        fine_label = batch[
+            "fine_sarcasm_label"
+        ].to(device)
+
+        has_rephrase = batch[
+            "has_rephrase"
+        ].to(device)
+
+        outputs = model(
+            tweet_input_ids=tweet_input_ids,
+            tweet_attention_mask=tweet_attention_mask,
+            rephrase_input_ids=rephrase_input_ids,
+            rephrase_attention_mask=rephrase_attention_mask,
+        )
+
+        # --------------------------------------------------
+        # 1. Binary sarcasm loss
+        # --------------------------------------------------
+
+        loss_binary = binary_loss_fn(
+            outputs["binary_logits"],
+            sarcastic_label,
+        )
+
+        # --------------------------------------------------
+        # 2. Rephrase contrastive loss
+        # --------------------------------------------------
+
+        valid_rephrase = has_rephrase.bool()
+
+        if valid_rephrase.sum() >= 2:
+            tweet_proj = outputs["tweet_proj"][
+                valid_rephrase
+            ]
+
+            rephrase_proj = outputs["rephrase_proj"][
+                valid_rephrase
+            ]
+
+            loss_rephrase = contrastive_loss_fn(
+                tweet_proj,
+                rephrase_proj,
+            )
+        else:
+            loss_rephrase = torch.tensor(
+                0.0,
+                device=device,
+                requires_grad=True,
+            )
+
+        # --------------------------------------------------
+        # 3. Fine-grained sarcasm-category loss
+        # --------------------------------------------------
+
+        pos_weight_tensor = torch.tensor(
+            fine_pos_weight,
+            dtype=torch.float32,
+            device=device,
+        )
+
+        loss_fine = masked_binary_loss(
+            outputs["fine_logits"],
+            fine_label,
+            pos_weight=pos_weight_tensor,
+        )
+
+        # --------------------------------------------------
+        # Combined loss
+        # --------------------------------------------------
+
+        loss = (
+            binary_weight * loss_binary
+            + rephrase_weight * loss_rephrase
+            + fine_weight * loss_fine
+        )
+
+        loss_for_backward = (
+            loss / gradient_accumulation_steps
+        )
+
+        loss_for_backward.backward()
+
+        if (
+            (step + 1) % gradient_accumulation_steps == 0
+            or (step + 1) == len(loader)
+        ):
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=1.0,
+            )
+
+            optimizer.step()
+
+            if scheduler is not None:
+                scheduler.step()
+
+            optimizer.zero_grad(set_to_none=True)
+
+        total_loss += loss.item()
+        total_binary += loss_binary.item()
+        total_rephrase += loss_rephrase.item()
+        total_fine += loss_fine.item()
+
+    n = len(loader)
+
+    return {
+        "loss": total_loss / n,
+        "binary_loss": total_binary / n,
+        "rephrase_loss": total_rephrase / n,
+        "fine_loss": total_fine / n,
+    }
+def print_lora_adapter_norms(model):
+    print("\n" + "=" * 70)
+    print("LoRA ADAPTER NORMS")
+    print("=" * 70)
+
+    for name, param in model.named_parameters():
+
+        if "lora_A" not in name and "lora_B" not in name:
+            continue
+
+        if not param.requires_grad:
+            continue
+
+        print(
+            f"{name:<100} "
+            f"norm={param.detach().float().norm().item():.8f}"
+        )
+
+    print("=" * 70)
+def print_all_lora_adapter_norms(model):
+    print("\n" + "=" * 80)
+    print("ALL LoRA ADAPTER NORMS")
+    print("=" * 80)
+
+    for name, param in model.named_parameters():
+
+        if (
+            "lora_A" not in name
+            and "lora_B" not in name
+        ):
+            continue
+
+        if not param.requires_grad:
+            continue
+
+        print(
+            f"{name:<110} "
+            f"norm={param.detach().float().norm().item():.8f}"
+        )
+
+    print("=" * 80)
 
 def main(args):
 
@@ -958,6 +2051,31 @@ def main(args):
 
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # ==================================================
+    # iSarcasmEval GENERAL ADAPTER PRETRAINING
+    # ==================================================
+
+    if USE_ISARCASM_PRETRAINING:
+
+        if os.path.exists(
+            GENERAL_ADAPTER_CHECKPOINT
+        ):
+
+            print(
+                "\nExisting general adapter checkpoint found:"
+            )
+
+            print(
+                GENERAL_ADAPTER_CHECKPOINT
+            )
+
+            print(
+                "Skipping iSarcasm pretraining."
+            )
+
+        else:
+
+            pretrain_general_adapter()
 
    
 
@@ -1018,8 +2136,63 @@ def main(args):
             lora_dropout=0.05,
             dropout=0.1
         )
-
+        # --------------------------------------------------
+        # Initialize GENERAL LoRA from iSarcasmEval
+        # --------------------------------------------------
         model.to(DEVICE)
+        if USE_ISARCASM_PRETRAINING:
+            state_before = {
+                name: param.detach().cpu().clone()
+                for name, param in model.named_parameters()
+                if "lora_A" in name or "lora_B" in name
+            }
+            load_general_adapter_weights(
+                model=model,
+                checkpoint_path=GENERAL_ADAPTER_CHECKPOINT
+            )
+
+        
+        model.rebuild_weighted_adapters()
+        print(
+            "\nAvailable adapters:"
+        )
+
+        print(
+            model.encoder.peft_config.keys()
+)
+        # print_all_lora_adapter_norms(model)
+        # changed = []
+
+        # for name, param in model.named_parameters():
+
+        #     if "lora_A" not in name and "lora_B" not in name:
+        #         continue
+
+        #     if name not in state_before:
+        #         continue
+
+        #     before = state_before[name]
+        #     after = param.detach().cpu()
+
+        #     difference = (
+        #         after.float() - before.float()
+        #     ).abs().max().item()
+
+        #     if difference > 0:
+        #         changed.append(
+        #             (name, difference)
+        #         )
+
+        # print("\nChanged LoRA parameters:")
+        # print(f"Count: {len(changed)}")
+
+        # for name, diff in changed[:30]:
+        #     print(
+        #         f"{name}: max_difference={diff:.8f}"
+        #     )
+        # print_lora_adapter_norms(model)
+        
+        
 
         if NUM_GPUS > 1:
             print(

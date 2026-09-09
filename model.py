@@ -150,6 +150,55 @@ class DialectAwareMultiTaskDeBERTa(nn.Module):
             num_labels=2
         )
 
+    def rebuild_weighted_adapters(self):
+
+        print("\nRebuilding weighted dialect adapters...")
+
+        # --------------------------------------------------------
+        # Remove old weighted adapters if they already exist
+        # --------------------------------------------------------
+
+        existing_adapters = list(
+            self.encoder.peft_config.keys()
+        )
+
+        if "general_au" in existing_adapters:
+            self.encoder.delete_adapter(
+                "general_au"
+            )
+
+        if "general_uk" in existing_adapters:
+            self.encoder.delete_adapter(
+                "general_uk"
+            )
+
+        # --------------------------------------------------------
+        # Recreate them FROM THE CURRENT general weights
+        # --------------------------------------------------------
+
+        self.encoder.add_weighted_adapter(
+            ["general", "au"],
+            [1.0, 1.0],
+            adapter_name="general_au",
+            combination_type="linear",
+        )
+
+        self.encoder.add_weighted_adapter(
+            ["general", "uk"],
+            [1.0, 1.0],
+            adapter_name="general_uk",
+            combination_type="linear",
+        )
+
+        print(
+            "✓ general_au rebuilt from current general + au"
+        )
+
+        print(
+            "✓ general_uk rebuilt from current general + uk"
+        )
+
+
     def mean_pooling(
         self,
         hidden_states,
