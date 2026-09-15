@@ -1,0 +1,132 @@
+```python
+def print_adapter_gradient_stats(model):
+
+    adapters = [
+        "sentiment_au",
+        "sentiment_uk",
+        "sarcasm_au",
+        "sarcasm_uk",
+    ]
+
+    print("\n" + "=" * 70)
+    print("ADAPTER GRADIENT STATISTICS")
+    print("=" * 70)
+
+    for adapter in adapters:
+
+        total_norm_sq = 0.0
+        grad_tensors = 0
+        missing_gradients = 0
+        nonzero_gradients = 0
+
+        for name, param in model.named_parameters():
+
+            if (
+                f"lora_A.{adapter}." not in name
+                and f"lora_B.{adapter}." not in name
+            ):
+                continue
+
+            if param.grad is None:
+                missing_gradients += 1
+                continue
+
+            grad_tensors += 1
+
+            grad_norm = (
+                param.grad.detach()
+                .float()
+                .norm()
+                .item()
+            )
+
+            total_norm_sq += grad_norm ** 2
+
+            if grad_norm > 0:
+                nonzero_gradients += 1
+
+        total_norm = (
+            total_norm_sq ** 0.5
+        )
+
+        print(
+            f"{adapter:15s} | "
+            f"norm={total_norm:.6e} | "
+            f"grad={grad_tensors} | "
+            f"missing={missing_gradients} | "
+            f"nonzero={nonzero_gradients}"
+        )
+
+    print("=" * 70)
+```
+
+Call it immediately before:
+
+```python
+optimizer.step()
+```
+
+So:
+
+```python
+torch.nn.utils.clip_grad_norm_(
+    model.parameters(),
+    1.0
+)
+
+print_adapter_gradient_stats(model)
+
+optimizer.step()
+```
+
+### What we want to see
+
+Something like:
+
+```text
+ADAPTER GRADIENT STATISTICS
+sentiment_au     | norm=2.31e-02 | grad=72 | missing=0 | nonzero=72
+sentiment_uk     | norm=1.87e-02 | grad=72 | missing=0 | nonzero=72
+sarcasm_au       | norm=4.92e-02 | grad=72 | missing=0 | nonzero=72
+sarcasm_uk       | norm=3.71e-02 | grad=72 | missing=0 | nonzero=72
+```
+
+That would prove that the four adapters are actually participating in training.
+
+---
+
+## One more thing I noticed in your files
+
+Your model really does have four independent adapters:
+
+```text
+sentiment_au
+sentiment_uk
+sarcasm_au
+sarcasm_uk
+```
+
+and the forward branches them exactly as intended.
+So **we do not need to redesign the entire model again**.
+
+The immediate fix is:
+
+```text
+adapter_names=...
+       ↓
+REMOVE
+
+set_adapter(...)
+       ↓
+KEEP
+
+set_adapter(...)
++
+re-enable ALL LoRA requires_grad
+       ↓
+USE
+```
+
+And your float32 fix is working: the current log explicitly shows all LoRA parameters as `torch.float32`.
+
+So the current error is purely about **PEFT adapter routing during training**, not NaNs or numerical precision.

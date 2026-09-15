@@ -113,6 +113,11 @@ GENERAL_ADAPTER_CHECKPOINT = (
     "checkpoints/"
     "isarcasm_general_lora.pt"
 )
+
+ALTA_CHECKPOINT_DIR = (
+    "checkpoints/task_specific"
+)
+
 ISARCASM_MAX_LENGTH = 128
 
 ISARCASM_BATCH_SIZE = 4
@@ -205,9 +210,381 @@ def set_seed(seed=42):
 
 
 set_seed(SEED)
+def check_model_finite(model):
+    print("\n" + "=" * 70)
+    print("FINITE VALUE CHECK")
+    print("=" * 70)
 
+    bad = []
 
+    for name, param in model.named_parameters():
 
+        if not torch.isfinite(param).all():
+
+            bad.append(name)
+
+            print(
+                f"NON-FINITE: {name}"
+            )
+
+    if len(bad) == 0:
+        print("✓ All model parameters are finite.")
+    else:
+        print(
+            f"✗ Found {len(bad)} parameters "
+            f"containing NaN/Inf."
+        )
+
+    print("=" * 70)
+
+def initialize_sarcasm_adapters_from_pretrained(
+    model,
+    checkpoint_path,
+):
+    """
+    Initialize both ALTA sarcasm adapters from the pretrained
+    iSarcasm general LoRA adapter.
+
+        iSarcasm general
+              │
+        ┌─────┴─────┐
+        ▼           ▼
+    sarcasm_au   sarcasm_uk
+
+    Sentiment adapters are NOT modified.
+    """
+
+    import os
+    import torch
+
+    device = next(model.parameters()).device
+
+    # ============================================================
+    # Resolve checkpoint
+    # ============================================================
+
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint path does not exist:\n"
+            f"{checkpoint_path}"
+        )
+
+    if os.path.isdir(checkpoint_path):
+
+        checkpoint_file = os.path.join(
+            checkpoint_path,
+            "best_general_adapter.pt",
+        )
+
+        if not os.path.isfile(checkpoint_file):
+            raise FileNotFoundError(
+                "Could not find pretrained checkpoint:\n"
+                f"{checkpoint_file}\n\n"
+                f"Directory contents:\n"
+                f"{os.listdir(checkpoint_path)}"
+            )
+
+    else:
+        checkpoint_file = checkpoint_path
+
+    print(
+        "\nLoading pretrained sarcasm adapter from:"
+    )
+    print(checkpoint_file)
+
+    # ============================================================
+    # Load checkpoint
+    # ============================================================
+
+    checkpoint = torch.load(
+        checkpoint_file,
+        map_location=device,
+        weights_only=False,
+    )
+
+    if isinstance(checkpoint, dict):
+
+        if "model_state_dict" in checkpoint:
+            pretrained_state = checkpoint[
+                "model_state_dict"
+            ]
+
+        elif "state_dict" in checkpoint:
+            pretrained_state = checkpoint[
+                "state_dict"
+            ]
+
+        else:
+            pretrained_state = checkpoint
+
+    else:
+        raise ValueError(
+            "Unsupported checkpoint format: "
+            f"{type(checkpoint)}"
+        )
+
+    # ============================================================
+    # Current model state
+    # ============================================================
+
+    current_state = model.state_dict()
+
+    transferred_au = 0
+    transferred_uk = 0
+    skipped = 0
+
+    au_examples = []
+    uk_examples = []
+
+    # ============================================================
+    # Transfer
+    # ============================================================
+
+    for source_key, source_value in pretrained_state.items():
+
+        # We only want the pretrained general LoRA tensors.
+        if "lora_A.general." not in source_key and \
+           "lora_B.general." not in source_key:
+            continue
+
+        # --------------------------------------------------------
+        # Create exact target names by replacing ONLY the adapter
+        # name.
+        # --------------------------------------------------------
+
+        au_key = (
+            source_key
+            .replace(
+                ".lora_A.general.",
+                ".lora_A.sarcasm_au.",
+            )
+            .replace(
+                ".lora_B.general.",
+                ".lora_B.sarcasm_au.",
+            )
+        )
+
+        uk_key = (
+            source_key
+            .replace(
+                ".lora_A.general.",
+                ".lora_A.sarcasm_uk.",
+            )
+            .replace(
+                ".lora_B.general.",
+                ".lora_B.sarcasm_uk.",
+            )
+        )
+
+        # --------------------------------------------------------
+        # Sanity check
+        # --------------------------------------------------------
+
+        source_is_lora = (
+            "lora_A.general" in source_key
+            or "lora_B.general" in source_key
+        )
+
+        if not source_is_lora:
+            continue
+
+        # ========================================================
+        # AU
+        # ========================================================
+
+        if au_key in current_state:
+
+            if (
+                current_state[au_key].shape
+                == source_value.shape
+            ):
+
+                current_state[au_key] = (
+                    source_value.to(
+                        device=current_state[
+                            au_key
+                        ].device,
+                        dtype=current_state[
+                            au_key
+                        ].dtype,
+                    )
+                )
+
+                transferred_au += 1
+
+                if len(au_examples) < 5:
+                    au_examples.append(
+                        (
+                            source_key,
+                            au_key,
+                        )
+                    )
+
+            else:
+                skipped += 1
+
+        else:
+            skipped += 1
+
+        # ========================================================
+        # UK
+        # ========================================================
+
+        if uk_key in current_state:
+
+            if (
+                current_state[uk_key].shape
+                == source_value.shape
+            ):
+
+                current_state[uk_key] = (
+                    source_value.to(
+                        device=current_state[
+                            uk_key
+                        ].device,
+                        dtype=current_state[
+                            uk_key
+                        ].dtype,
+                    )
+                )
+
+                transferred_uk += 1
+
+                if len(uk_examples) < 5:
+                    uk_examples.append(
+                        (
+                            source_key,
+                            uk_key,
+                        )
+                    )
+
+            else:
+                skipped += 1
+
+        else:
+            skipped += 1
+
+    # ============================================================
+    # Load modified state
+    # ============================================================
+
+    model.load_state_dict(
+        current_state,
+        strict=False,
+    )
+
+    # ============================================================
+    # Report
+    # ============================================================
+
+    print()
+    print("=" * 70)
+    print(
+        "iSARCASM → ALTA SARCASM ADAPTER INITIALIZATION"
+    )
+    print("=" * 70)
+
+    print(
+        f"Source LoRA tensors : "
+        f"{len([k for k in pretrained_state if 'lora_A.general.' in k or 'lora_B.general.' in k])}"
+    )
+
+    print(
+        f"sarcasm_au tensors  : "
+        f"{transferred_au}"
+    )
+
+    print(
+        f"sarcasm_uk tensors  : "
+        f"{transferred_uk}"
+    )
+
+    print(
+        f"Skipped             : "
+        f"{skipped}"
+    )
+
+    print("=" * 70)
+
+    # ------------------------------------------------------------
+    # Show a few mappings so we can verify the names.
+    # ------------------------------------------------------------
+
+    print("\nExample AU mappings:")
+
+    for source_key, target_key in au_examples:
+        print(
+            f"  {source_key}\n"
+            f"    -> {target_key}"
+        )
+
+    print("\nExample UK mappings:")
+
+    for source_key, target_key in uk_examples:
+        print(
+            f"  {source_key}\n"
+            f"    -> {target_key}"
+        )
+
+    print()
+
+    # ============================================================
+    # Required sanity check
+    # ============================================================
+
+    if transferred_au != 72:
+        raise RuntimeError(
+            "Expected 72 LoRA tensors for sarcasm_au, "
+            f"but transferred {transferred_au}."
+        )
+
+    if transferred_uk != 72:
+        raise RuntimeError(
+            "Expected 72 LoRA tensors for sarcasm_uk, "
+            f"but transferred {transferred_uk}."
+        )
+
+    print(
+        "✓ 72/72 iSarcasm LoRA tensors copied to sarcasm_au."
+    )
+
+    print(
+        "✓ 72/72 iSarcasm LoRA tensors copied to sarcasm_uk."
+    )
+
+    print(
+        "✓ Sentiment adapters were left untouched."
+    )
+
+    return model
+def force_lora_parameters_to_float32(model):
+    """
+    Force all ALTA LoRA parameters to float32.
+
+    This prevents unstable optimizer updates when LoRA
+    parameters are stored in float16/bfloat16.
+    """
+
+    converted = 0
+
+    for name, param in model.named_parameters():
+
+        if (
+            "lora_A" not in name
+            and "lora_B" not in name
+        ):
+            continue
+
+        if param.dtype != torch.float32:
+
+            param.data = param.data.float()
+
+            converted += 1
+
+    print(
+        f"✓ Converted {converted} LoRA parameter tensors "
+        f"to float32."
+    )    
 def compute_class_weights(labels):
 
     labels = np.asarray(labels)
@@ -382,7 +759,6 @@ def train_one_epoch(
         )
 
         loss.backward()
-
         # ==================================================
         # Optimizer step
         # ==================================================
@@ -400,6 +776,40 @@ def train_one_epoch(
             )
 
             optimizer.step()
+            print_adapter_gradient_stats(model)
+            print(
+                f"Before optimizer step: "
+                f"loss={total_batch_loss.item():.6f}"
+            )
+            # ============================================================
+            # DEBUG: CHECK PARAMETERS AFTER OPTIMIZER STEP
+            # ============================================================
+
+            bad_parameters = []
+
+            for name, param in model.named_parameters():
+
+                if not torch.isfinite(param).all():
+
+                    bad_parameters.append(name)
+
+            print(
+                f"After optimizer step: "
+                f"bad_parameters={len(bad_parameters)}"
+            )
+
+            if bad_parameters:
+
+                print("First non-finite parameters:")
+
+                for name in bad_parameters[:20]:
+                    print(
+                        f"  {name}"
+                    )
+
+                raise RuntimeError(
+                    "Non-finite parameter detected after optimizer.step()."
+                )
 
             scheduler.step()
 
@@ -438,9 +848,8 @@ def train_one_epoch(
 from sklearn.model_selection import train_test_split
 from transformers import get_linear_schedule_with_warmup
 
-
 def pretrain_general_adapter(
-    train_csv = ISARCASM_TRAIN_PATH,
+    train_csv=ISARCASM_TRAIN_PATH,
     model_name=MODEL_NAME,
     output_dir=GENERAL_ADAPTER_CHECKPOINT,
     max_length=ISARCASM_MAX_LENGTH,
@@ -454,12 +863,12 @@ def pretrain_general_adapter(
     seed=42,
     num_workers=2,
 ):
+
     os.makedirs(output_dir, exist_ok=True)
 
     # --------------------------------------------------
     # Reproducibility
     # --------------------------------------------------
-
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -470,7 +879,6 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Load data
     # --------------------------------------------------
-
     df = pd.read_csv(train_csv)
 
     required_columns = [
@@ -499,7 +907,12 @@ def pretrain_general_adapter(
 
     print(
         "Rephrase availability:",
-        df["rephrase"].fillna("").astype(str).str.strip().ne("").sum()
+        df["rephrase"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+        .sum()
     )
 
     print(
@@ -510,7 +923,6 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Stratified split using MAIN sarcastic label
     # --------------------------------------------------
-
     train_df, val_df = train_test_split(
         df,
         test_size=val_size,
@@ -529,7 +941,6 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Tokenizer
     # --------------------------------------------------
-
     tokenizer = AutoTokenizer.from_pretrained(
         model_name
     )
@@ -537,7 +948,6 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Dataset
     # --------------------------------------------------
-
     train_dataset = ISarcasmDataset(
         train_df,
         tokenizer,
@@ -550,6 +960,9 @@ def pretrain_general_adapter(
         max_length=max_length,
     )
 
+    # --------------------------------------------------
+    # DataLoaders
+    # --------------------------------------------------
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -569,9 +982,9 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Model
     # --------------------------------------------------
-
     device = torch.device(
-        "cuda" if torch.cuda.is_available()
+        "cuda"
+        if torch.cuda.is_available()
         else "cpu"
     )
 
@@ -592,17 +1005,20 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Binary sarcasm class weights
     # --------------------------------------------------
-
     binary_counts = (
         train_df["sarcastic"]
         .value_counts()
         .sort_index()
     )
 
-    n_negative = int(binary_counts.get(0, 1))
-    n_positive = int(binary_counts.get(1, 1))
+    n_negative = int(
+        binary_counts.get(0, 1)
+    )
 
-    # Standard inverse-frequency weighting
+    n_positive = int(
+        binary_counts.get(1, 1)
+    )
+
     class_weights = torch.tensor(
         [
             1.0,
@@ -619,7 +1035,6 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Fine-grained sarcasm weight
     # --------------------------------------------------
-
     fine_pos_weight = calculate_fine_sarcasm_pos_weight(
         train_df
     )
@@ -632,7 +1047,6 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Contrastive loss
     # --------------------------------------------------
-
     contrastive_loss_fn = RephraseContrastiveLoss(
         temperature=0.07
     )
@@ -640,9 +1054,9 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Optimizer
     # --------------------------------------------------
-
     trainable_params = [
-        p for p in model.parameters()
+        p
+        for p in model.parameters()
         if p.requires_grad
     ]
 
@@ -650,8 +1064,12 @@ def pretrain_general_adapter(
         trainable_params,
         lr=learning_rate,
         weight_decay=weight_decay,
+        eps=1e-6,
     )
 
+    # --------------------------------------------------
+    # Scheduler
+    # --------------------------------------------------
     steps_per_epoch = max(
         1,
         (
@@ -679,11 +1097,13 @@ def pretrain_general_adapter(
     # --------------------------------------------------
     # Training
     # --------------------------------------------------
-
     best_f1 = -1.0
     best_epoch = -1
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(
+        1,
+        num_epochs + 1
+    ):
 
         train_metrics = pretrain_one_epoch(
             model=model,
@@ -697,7 +1117,9 @@ def pretrain_general_adapter(
             binary_weight=0.60,
             rephrase_weight=0.25,
             fine_weight=0.15,
-            gradient_accumulation_steps=gradient_accumulation_steps,
+            gradient_accumulation_steps=(
+                gradient_accumulation_steps
+            ),
         )
 
         val_metrics = evaluate_isarcasm(
@@ -748,10 +1170,15 @@ def pretrain_general_adapter(
         # --------------------------------------------------
         # Save best adapter
         # --------------------------------------------------
+        if (
+            val_metrics["macro_f1"]
+            > best_f1
+        ):
 
-        if val_metrics["macro_f1"] > best_f1:
+            best_f1 = (
+                val_metrics["macro_f1"]
+            )
 
-            best_f1 = val_metrics["macro_f1"]
             best_epoch = epoch
 
             checkpoint_path = os.path.join(
@@ -761,10 +1188,17 @@ def pretrain_general_adapter(
 
             torch.save(
                 {
-                    "model_state_dict": model.state_dict(),
-                    "best_f1": best_f1,
-                    "best_epoch": best_epoch,
-                    "model_name": model_name,
+                    "model_state_dict":
+                        model.state_dict(),
+
+                    "best_f1":
+                        best_f1,
+
+                    "best_epoch":
+                        best_epoch,
+
+                    "model_name":
+                        model_name,
                 },
                 checkpoint_path,
             )
@@ -1232,7 +1666,7 @@ def evaluate(
     sarcasm_weight=0.6
 ):
     model.eval()
-
+    
     total_loss = 0.0
 
     # --------------------------------------------------
@@ -1988,6 +2422,108 @@ def print_all_lora_adapter_norms(model):
 
     print("=" * 80)
 
+
+def enable_all_lora_gradients(model):
+
+    adapters = [
+        "sentiment_au",
+        "sentiment_uk",
+        "sarcasm_au",
+        "sarcasm_uk",
+    ]
+
+    counts = {
+        adapter: 0
+        for adapter in adapters
+    }
+
+    for name, param in model.named_parameters():
+
+        matched = False
+
+        for adapter in adapters:
+
+            if (
+                f"lora_A.{adapter}." in name
+                or f"lora_B.{adapter}." in name
+            ):
+                param.requires_grad_(True)
+                counts[adapter] += param.numel()
+                matched = True
+                break
+
+    print("\n" + "=" * 70)
+    print("LORA TRAINABILITY CHECK")
+    print("=" * 70)
+
+    for adapter in adapters:
+        print(
+            f"{adapter:15s}: "
+            f"{counts[adapter]:,} parameters"
+        )
+
+    print("=" * 70)
+
+def print_adapter_gradient_stats(model):
+
+    adapters = [
+        "sentiment_au",
+        "sentiment_uk",
+        "sarcasm_au",
+        "sarcasm_uk",
+    ]
+
+    print("\n" + "=" * 70)
+    print("ADAPTER GRADIENT STATISTICS")
+    print("=" * 70)
+
+    for adapter in adapters:
+
+        total_norm_sq = 0.0
+        grad_tensors = 0
+        missing_gradients = 0
+        nonzero_gradients = 0
+
+        for name, param in model.named_parameters():
+
+            if (
+                f"lora_A.{adapter}." not in name
+                and f"lora_B.{adapter}." not in name
+            ):
+                continue
+
+            if param.grad is None:
+                missing_gradients += 1
+                continue
+
+            grad_tensors += 1
+
+            grad_norm = (
+                param.grad.detach()
+                .float()
+                .norm()
+                .item()
+            )
+
+            total_norm_sq += grad_norm ** 2
+
+            if grad_norm > 0:
+                nonzero_gradients += 1
+
+        total_norm = (
+            total_norm_sq ** 0.5
+        )
+
+        print(
+            f"{adapter:15s} | "
+            f"norm={total_norm:.6e} | "
+            f"grad={grad_tensors} | "
+            f"missing={missing_gradients} | "
+            f"nonzero={nonzero_gradients}"
+        )
+
+    print("=" * 70)
+
 def main(args):
 
     NUM_EPOCHS = args.epochs
@@ -2056,9 +2592,9 @@ def main(args):
     # ==================================================
 
     if USE_ISARCASM_PRETRAINING:
-
+        pretrained_checkpoint = os.path.join( GENERAL_ADAPTER_CHECKPOINT, "best_general_adapter.pt", )
         if os.path.exists(
-            GENERAL_ADAPTER_CHECKPOINT
+            pretrained_checkpoint
         ):
 
             print(
@@ -2089,7 +2625,7 @@ def main(args):
     )
 
     os.makedirs(
-        "checkpoints",
+        ALTA_CHECKPOINT_DIR,
         exist_ok=True
     )
 
@@ -2141,56 +2677,30 @@ def main(args):
         # --------------------------------------------------
         model.to(DEVICE)
         if USE_ISARCASM_PRETRAINING:
-            state_before = {
-                name: param.detach().cpu().clone()
-                for name, param in model.named_parameters()
-                if "lora_A" in name or "lora_B" in name
-            }
-            load_general_adapter_weights(
+            initialize_sarcasm_adapters_from_pretrained(
                 model=model,
-                checkpoint_path=GENERAL_ADAPTER_CHECKPOINT
+                checkpoint_path=GENERAL_ADAPTER_CHECKPOINT,
             )
+            force_lora_parameters_to_float32( model )
+            enable_all_lora_gradients(model)
+            check_model_finite(model)
+            print("\nLoRA parameter dtypes:")
 
-        
-        model.rebuild_weighted_adapters()
+            for name, param in model.named_parameters():
+
+                if (
+                    "lora_A" in name
+                    or "lora_B" in name
+                ):
+                    print(
+                        f"{name}: {param.dtype}"
+                    )
         print(
             "\nAvailable adapters:"
         )
 
         print(
-            model.encoder.peft_config.keys()
-)
-        # print_all_lora_adapter_norms(model)
-        # changed = []
-
-        # for name, param in model.named_parameters():
-
-        #     if "lora_A" not in name and "lora_B" not in name:
-        #         continue
-
-        #     if name not in state_before:
-        #         continue
-
-        #     before = state_before[name]
-        #     after = param.detach().cpu()
-
-        #     difference = (
-        #         after.float() - before.float()
-        #     ).abs().max().item()
-
-        #     if difference > 0:
-        #         changed.append(
-        #             (name, difference)
-        #         )
-
-        # print("\nChanged LoRA parameters:")
-        # print(f"Count: {len(changed)}")
-
-        # for name, diff in changed[:30]:
-        #     print(
-        #         f"{name}: max_difference={diff:.8f}"
-        #     )
-        # print_lora_adapter_norms(model)
+            model.encoder.peft_config.keys())
         
         
 
@@ -2277,10 +2787,17 @@ def main(args):
 
         
        
+        trainable_parameters = [
+            param
+            for param in model.parameters()
+            if param.requires_grad
+        ]
+
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            trainable_parameters,
             lr=LEARNING_RATE,
-            weight_decay=WEIGHT_DECAY
+            weight_decay=WEIGHT_DECAY,
+            eps=1e-6,
         )
 
         
@@ -2306,9 +2823,169 @@ def main(args):
         best_epoch = 0
 
         epochs_without_improvement = 0
+        # ============================================================
+        # DEBUG: CHECK FORWARD OUTPUTS AND LOSSES BEFORE TRAINING
+        # ============================================================
+
+        model.eval()
+
+        debug_batch = next(iter(train_loader))
+
+        debug_input_ids = debug_batch[
+            "input_ids"
+        ].to(DEVICE)
+
+        debug_attention_mask = debug_batch[
+            "attention_mask"
+        ].to(DEVICE)
+
+        debug_variety_ids = debug_batch[
+            "variety_ids"
+        ].to(DEVICE)
+
+        debug_sentiment_labels = debug_batch[
+            "sentiment_labels"
+        ].to(DEVICE)
+
+        debug_sarcasm_labels = debug_batch[
+            "sarcasm_labels"
+        ].to(DEVICE)
+
+
+        with torch.no_grad():
+
+            debug_outputs = model(
+                input_ids=debug_input_ids,
+                attention_mask=debug_attention_mask,
+                variety_ids=debug_variety_ids,
+            )
+
+
+        print("\n" + "=" * 70)
+        print("FORWARD / LOSS DEBUG")
+        print("=" * 70)
+
+        sentiment_logits = debug_outputs[
+            "sentiment_logits"
+        ]
+
+        sarcasm_logits = debug_outputs[
+            "sarcasm_logits"
+        ]
+
+        print(
+            "Sentiment logits finite:",
+            torch.isfinite(sentiment_logits).all().item()
+        )
+
+        print(
+            "Sarcasm logits finite:",
+            torch.isfinite(sarcasm_logits).all().item()
+        )
+
+        print(
+            "Sentiment logits:\n",
+            sentiment_logits
+        )
+
+        print(
+            "Sarcasm logits:\n",
+            sarcasm_logits
+        )
+
+
+        # ------------------------------------------------------------
+        # Check individual losses
+        # ------------------------------------------------------------
+
+        sentiment_debug_loss = sentiment_loss(
+            sentiment_logits,
+            debug_sentiment_labels,
+        )
+
+        au_mask = (
+            debug_variety_ids == 0
+        )
+
+        uk_mask = (
+            debug_variety_ids == 1
+        )
+
+        print(
+            "\nSentiment loss:",
+            sentiment_debug_loss.item()
+        )
+
+        if au_mask.any():
+
+            au_debug_loss = au_sarcasm_loss(
+                sarcasm_logits[au_mask],
+                debug_sarcasm_labels[au_mask],
+            )
+
+            print(
+                "AU sarcasm loss:",
+                au_debug_loss.item()
+            )
+
+        else:
+            au_debug_loss = None
+
+
+        if uk_mask.any():
+
+            uk_debug_loss = uk_sarcasm_loss(
+                sarcasm_logits[uk_mask],
+                debug_sarcasm_labels[uk_mask],
+            )
+
+            print(
+                "UK sarcasm loss:",
+                uk_debug_loss.item()
+            )
+
+        else:
+            uk_debug_loss = None
+
+
+        print("=" * 70)
 
 
         for epoch in range(NUM_EPOCHS):
+            print("\n" + "=" * 70)
+            print("FINAL LoRA DTYPE CHECK")
+            print("=" * 70)
+
+            bad_dtype = []
+
+            for name, param in model.named_parameters():
+
+                if (
+                    "lora_A" in name
+                    or "lora_B" in name
+                ):
+
+                    if param.dtype != torch.float32:
+
+                        bad_dtype.append(
+                            (name, param.dtype)
+                        )
+
+                    print(
+                        f"{name}: {param.dtype}"
+                    )
+
+            print("=" * 70)
+
+            if bad_dtype:
+
+                raise RuntimeError(
+                    "Some LoRA parameters are not float32."
+                )
+
+            print(
+                "✓ All LoRA parameters are float32."
+            )
 
             print(
                 f"\nEpoch {epoch + 1} / {NUM_EPOCHS}"
@@ -2386,11 +3063,7 @@ def main(args):
 
                 epochs_without_improvement = 0
 
-                checkpoint_path = (
-                    f"checkpoints/"
-                    f"best_fold_"
-                    f"{fold + 1}.pt"
-                )
+                checkpoint_path = os.path.join(ALTA_CHECKPOINT_DIR,f"best_fold_{fold + 1}.pt",)
 
                 # ------------------------------------------
                 # Save underlying model if DataParallel
@@ -2616,10 +3289,7 @@ def main(args):
 
     for fold in range(NUM_FOLDS):
 
-        checkpoint_path = (
-            f"checkpoints/"
-            f"best_fold_{fold + 1}.pt"
-        )
+        checkpoint_path = os.path.join( ALTA_CHECKPOINT_DIR, f"best_fold_{fold + 1}.pt", )
 
         if not os.path.exists(
             checkpoint_path
@@ -2640,18 +3310,19 @@ def main(args):
             lora_r=8,
             lora_alpha=16,
             lora_dropout=0.05,
-            dropout=0.1
-        )
+            dropout=0.1,)
 
         model.to(DEVICE)
 
         checkpoint = torch.load(
             checkpoint_path,
-            map_location=DEVICE
+            map_location=DEVICE,
+            weights_only=False,
         )
 
         model.load_state_dict(
-            checkpoint["model_state_dict"]
+            checkpoint["model_state_dict"],
+            strict=True,
         )
         
         if NUM_GPUS > 1:
