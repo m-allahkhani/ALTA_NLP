@@ -107,11 +107,11 @@ MODEL_NAME = (
 # ============================================================
 
 ISARCASM_TRAIN_PATH =  "iSarcasmEval_train.csv"
-
+ISARCASM_TEST_BINARY_PATH = "iSarcasmEvalTest_task_A_En_test.csv"
+ISARCASM_TEST_ADDITIONAL_PATH = "iSarcasmEvalTest_task_B_En_test.csv"
 
 GENERAL_ADAPTER_CHECKPOINT = (
     "checkpoints/"
-    "isarcasm_general_lora.pt"
 )
 
 ALTA_CHECKPOINT_DIR = (
@@ -847,9 +847,270 @@ def train_one_epoch(
 
 from sklearn.model_selection import train_test_split
 from transformers import get_linear_schedule_with_warmup
+def load_additional_isarcasm_test_data(
+    binary_test_csv=None,
+    fine_test_csv=None,
+):
+    """
+    Load additional labeled iSarcasm data.
 
+    binary_test_csv:
+        columns: test, sarcastic
+
+    fine_test_csv:
+        columns:
+            text, sarcasm, irony, satire,
+            understatement, overstatement,
+            rhetorical_question
+
+    Returns a canonical dataframe with:
+        tweet
+        sarcastic
+        sarcasm
+        rephrase
+
+    The five auxiliary category columns are retained in the dataframe
+    for future experiments, but are NOT currently used as losses.
+    """
+
+    binary_df = None
+    fine_df = None
+
+    # ============================================================
+    # Binary test file
+    # ============================================================
+
+    if binary_test_csv is not None:
+
+        binary_df = pd.read_csv(binary_test_csv)
+
+        required = ["text", "sarcastic"]
+
+        missing = [
+            c for c in required
+            if c not in binary_df.columns
+        ]
+
+        if missing:
+            raise ValueError(
+                f"Binary iSarcasm test file is missing: {missing}"
+            )
+
+        binary_df = binary_df.rename(
+            columns={
+                "text": "tweet",
+            }
+        )
+
+        binary_df["tweet"] = (
+            binary_df["tweet"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        binary_df["sarcastic"] = pd.to_numeric(
+            binary_df["sarcastic"],
+            errors="coerce",
+        )
+
+        binary_df = binary_df[
+            binary_df["tweet"].ne("")
+            & binary_df["sarcastic"].notna()
+        ].copy()
+
+        binary_df["sarcastic"] = (
+            binary_df["sarcastic"]
+            .astype(int)
+        )
+
+    # ============================================================
+    # Fine-grained test file
+    # ============================================================
+
+    if fine_test_csv is not None:
+
+        fine_df = pd.read_csv(fine_test_csv)
+
+        required = [
+            "text",
+            "sarcasm",
+            "irony",
+            "satire",
+            "understatement",
+            "overstatement",
+            "rhetorical_question",
+        ]
+
+        missing = [
+            c for c in required
+            if c not in fine_df.columns
+        ]
+
+        if missing:
+            raise ValueError(
+                f"Fine-grained iSarcasm test file is missing: {missing}"
+            )
+
+        fine_df = fine_df.rename(
+            columns={
+                "text": "tweet",
+            }
+        )
+
+        fine_df["tweet"] = (
+            fine_df["tweet"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        fine_df = fine_df[
+            fine_df["tweet"].ne("")
+        ].copy()
+
+        # Convert the relevant fine-grained labels.
+        for col in [
+            "sarcasm",
+            "irony",
+            "satire",
+            "understatement",
+            "overstatement",
+            "rhetorical_question",
+        ]:
+            fine_df[col] = pd.to_numeric(
+                fine_df[col],
+                errors="coerce",
+            )
+
+    # ============================================================
+    # Nothing supplied
+    # ============================================================
+
+    if binary_df is None and fine_df is None:
+        return pd.DataFrame()
+
+    # ============================================================
+    # Merge the two test files
+    # ============================================================
+
+    if binary_df is not None and fine_df is not None:
+
+        merged = pd.merge(
+            binary_df,
+            fine_df,
+            on="tweet",
+            how="outer",
+            suffixes=("", "_fine"),
+        )
+
+        # Prefer the binary-test sarcastic label.
+        if "sarcastic_fine" in merged.columns:
+
+            merged["sarcastic"] = (
+                merged["sarcastic"]
+                .fillna(
+                    merged["sarcastic_fine"]
+                )
+            )
+
+            merged.drop(
+                columns=["sarcastic_fine"],
+                inplace=True,
+            )
+
+    elif binary_df is not None:
+
+        merged = binary_df.copy()
+
+    else:
+
+        merged = fine_df.copy()
+
+    # ============================================================
+    # Canonical columns required by current dataset
+    # ============================================================
+
+    if "sarcastic" not in merged.columns:
+
+        # If only the fine-grained file is available,
+        # infer binary sarcasm from its "sarcasm" annotation.
+        if "sarcasm" in merged.columns:
+
+            merged["sarcastic"] = (
+                merged["sarcasm"]
+                .fillna(0)
+                .astype(int)
+            )
+
+        else:
+            raise ValueError(
+                "Could not construct binary sarcastic labels."
+            )
+
+    # Rephrase does not exist in these files.
+    merged["rephrase"] = ""
+
+    # Ensure fine sarcasm exists.
+    if "sarcasm" not in merged.columns:
+
+        merged["sarcasm"] = np.nan
+
+    # ============================================================
+    # Remove exact duplicate tweets
+    # ============================================================
+
+    merged = (
+        merged
+        .drop_duplicates(
+            subset=["tweet"],
+            keep="first",
+        )
+        .reset_index(drop=True)
+    )
+
+    print(
+        "\nAdditional iSarcasm labeled data:"
+    )
+
+    print(
+        f"Samples: {len(merged)}"
+    )
+
+    print(
+        "Binary sarcasm distribution:\n",
+        merged["sarcastic"].value_counts(
+            dropna=False
+        )
+    )
+
+    print(
+        "Fine sarcasm availability:",
+        merged["sarcasm"].notna().sum()
+    )
+
+    return merged
+
+
+# def pretrain_general_adapter(
+#     train_csv=ISARCASM_TRAIN_PATH,
+#     model_name=MODEL_NAME,
+#     output_dir=GENERAL_ADAPTER_CHECKPOINT,
+#     max_length=ISARCASM_MAX_LENGTH,
+#     batch_size=ISARCASM_BATCH_SIZE,
+#     learning_rate=ISARCASM_LEARNING_RATE,
+#     weight_decay=ISARCASM_WEIGHT_DECAY,
+#     num_epochs=ISARCASM_EPOCHS,
+#     warmup_ratio=ISARCASM_WARMUP_RATIO,
+#     gradient_accumulation_steps=ISARCASM_GRADIENT_ACCUMULATION_STEPS,
+#     val_size=ISARCASM_VAL_RATIO,
+#     seed=42,
+#     num_workers=2,
+# ):
 def pretrain_general_adapter(
     train_csv=ISARCASM_TRAIN_PATH,
+    additional_binary_test_csv=None,
+    additional_fine_test_csv=None,
     model_name=MODEL_NAME,
     output_dir=GENERAL_ADAPTER_CHECKPOINT,
     max_length=ISARCASM_MAX_LENGTH,
@@ -876,9 +1137,9 @@ def pretrain_general_adapter(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # --------------------------------------------------
-    # Load data
-    # --------------------------------------------------
+   
+    # Load original iSarcasm training data
+
     df = pd.read_csv(train_csv)
 
     required_columns = [
@@ -889,7 +1150,8 @@ def pretrain_general_adapter(
     ]
 
     missing = [
-        c for c in required_columns
+        c
+        for c in required_columns
         if c not in df.columns
     ]
 
@@ -898,31 +1160,18 @@ def pretrain_general_adapter(
             f"Missing required columns: {missing}"
         )
 
-    print(f"Total samples: {len(df)}")
-
     print(
-        "Sarcastic distribution:\n",
-        df["sarcastic"].value_counts(dropna=False)
-    )
-
-    print(
-        "Rephrase availability:",
-        df["rephrase"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .ne("")
-        .sum()
-    )
-
-    print(
-        "Fine-grained sarcasm distribution:\n",
-        df["sarcasm"].value_counts(dropna=False)
+        f"Original iSarcasm training samples: {len(df)}"
     )
 
     # --------------------------------------------------
-    # Stratified split using MAIN sarcastic label
+    # Split ORIGINAL train data first
+    #
+    # Important:
+    # validation remains completely untouched by the
+    # additional labeled test data.
     # --------------------------------------------------
+
     train_df, val_df = train_test_split(
         df,
         test_size=val_size,
@@ -934,10 +1183,112 @@ def pretrain_general_adapter(
     val_df = val_df.reset_index(drop=True)
 
     print(
-        f"Train: {len(train_df)} | "
-        f"Validation: {len(val_df)}"
+        f"Original train split: {len(train_df)}"
     )
 
+    print(
+        f"Original validation split: {len(val_df)}"
+    )
+
+    # --------------------------------------------------
+    # Load additional labeled iSarcasm data
+    # --------------------------------------------------
+
+    additional_df = load_additional_isarcasm_test_data(
+        binary_test_csv=ISARCASM_TEST_BINARY_PATH,
+        fine_test_csv=ISARCASM_TEST_ADDITIONAL_PATH,
+    )
+
+    
+
+    if len(additional_df) > 0:
+
+        for col in [
+            "tweet",
+            "sarcastic",
+            "rephrase",
+            "sarcasm",
+        ]:
+            if col not in additional_df.columns:
+
+                if col == "rephrase":
+                    additional_df[col] = ""
+
+                elif col == "sarcasm":
+                    additional_df[col] = np.nan
+
+                else:
+                    raise ValueError(
+                        f"Additional data is missing '{col}'"
+                    )
+
+        train_df = pd.concat(
+            [
+                train_df,
+                additional_df[
+                    [
+                        "tweet",
+                        "sarcastic",
+                        "rephrase",
+                        "sarcasm",
+                    ]
+                ],
+            ],
+            ignore_index=True,
+        )
+
+        train_df["tweet"] = (
+            train_df["tweet"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        before_dedup = len(train_df)
+
+        train_df = (
+            train_df
+            .drop_duplicates(
+                subset=["tweet"],
+                keep="first",
+            )
+            .reset_index(drop=True)
+        )
+
+        removed = (
+            before_dedup
+            - len(train_df)
+        )
+
+        print(
+            f"\nAdditional pretraining data added: "
+            f"{len(additional_df)}"
+        )
+
+        print(
+            f"Duplicate tweets removed: {removed}"
+        )
+
+        print(
+            f"Final pretraining samples: "
+            f"{len(train_df)}"
+        )
+
+    else:
+
+        print(
+            "\nNo additional iSarcasm test data supplied."
+        )
+
+    print(
+        f"\nFinal training size: {len(train_df)}"
+    )
+
+    print(
+        f"Validation size: {len(val_df)}"
+    )
+
+    
     # --------------------------------------------------
     # Tokenizer
     # --------------------------------------------------
