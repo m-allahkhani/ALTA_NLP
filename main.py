@@ -7,6 +7,8 @@ import math
 import torch
 import torch.nn as nn
 
+import json
+
 from torch.utils.data import (
     DataLoader,
     Dataset,
@@ -109,6 +111,14 @@ MODEL_NAME = (
 ISARCASM_TRAIN_PATH =  "iSarcasmEval_train.csv"
 ISARCASM_TEST_BINARY_PATH = "iSarcasmEvalTest_task_A_En_test.csv"
 ISARCASM_TEST_ADDITIONAL_PATH = "iSarcasmEvalTest_task_B_En_test.csv"
+
+
+# Reddit shared-task sarcasm data
+REDDIT_SARCASM_PATH = "sarcasm_detection_shared_task_reddit_training.jsonl"
+
+# Start with 2,000 Reddit samples for a controlled experiment.
+# The dataset is approximately balanced, so we take 1,000 per class.
+REDDIT_PRETRAIN_SAMPLES = 4400
 
 GENERAL_ADAPTER_CHECKPOINT = (
     "checkpoints/"
@@ -847,6 +857,197 @@ def train_one_epoch(
 
 from sklearn.model_selection import train_test_split
 from transformers import get_linear_schedule_with_warmup
+
+def load_reddit_sarcasm_data(
+    jsonl_path,
+    max_samples=2000,
+    seed=42,
+):
+    """
+    Load the Reddit shared-task sarcasm dataset.
+
+    Expected JSONL format:
+    {
+        "label": "SARCASM" or "NOT_SARCASM",
+        "response": "...",
+        "context": ["...", "...", ...]
+    }
+
+    Output uses the same canonical schema as the iSarcasm
+    pretraining dataset:
+
+        tweet
+        sarcastic
+        rephrase
+        sarcasm
+
+    Reddit provides only binary sarcasm supervision, so:
+        rephrase = ""
+        sarcasm = NaN
+    """
+
+    if not os.path.exists(jsonl_path):
+        raise FileNotFoundError(
+            f"Reddit sarcasm dataset not found:\n{jsonl_path}"
+        )
+
+    rows = []
+
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(
+                    f"Warning: could not parse line {line_number}: {e}"
+                )
+                continue
+
+            label = str(item.get("label", "")).strip().upper()
+            response = str(item.get("response", "")).strip()
+
+            context = item.get("context", [])
+
+            if not isinstance(context, list):
+                context = [str(context)]
+
+            context = [
+                str(x).strip()
+                for x in context
+                if str(x).strip()
+            ]
+
+            if label not in {"SARCASM", "NOT_SARCASM"}:
+                continue
+
+            if not response:
+                continue
+
+            # IMPORTANT:
+            # Put the target response FIRST because MAX_LENGTH=128.
+            # This ensures the response is preserved if truncation occurs.
+            #
+            # Keep the most recent context turns because they are generally
+            # the most relevant to interpreting the response.
+            recent_context = context[-2:]
+
+            if recent_context:
+                context_text = "\n".join(
+                    f"Context {i + 1}: {text}"
+                    for i, text in enumerate(recent_context)
+                )
+
+                combined_text = (
+                    f"Response: {response}\n"
+                    f"{context_text}"
+                )
+            else:
+                combined_text = f"Response: {response}"
+
+            sarcastic = 1 if label == "SARCASM" else 0
+
+            rows.append(
+                {
+                    "tweet": combined_text,
+                    "sarcastic": sarcastic,
+                    "rephrase": "",
+                    "sarcasm": np.nan,
+                }
+            )
+
+    reddit_df = pd.DataFrame(rows)
+
+    if len(reddit_df) == 0:
+        raise ValueError(
+            "No valid Reddit sarcasm examples were loaded."
+        )
+
+    # Remove exact duplicate texts.
+    before_dedup = len(reddit_df)
+
+    reddit_df["tweet_normalized"] = (
+        reddit_df["tweet"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    reddit_df = reddit_df.drop_duplicates(
+        subset=["tweet_normalized"]
+    ).drop(columns=["tweet_normalized"])
+
+    duplicate_count = before_dedup - len(reddit_df)
+
+    # ------------------------------------------------------------------
+    # Balanced sampling
+    # ------------------------------------------------------------------
+    # We want 1,000 SARCASM + 1,000 NOT_SARCASM for the first experiment.
+    # This prevents the external dataset from changing the class balance.
+    # ------------------------------------------------------------------
+
+    target_per_class = max_samples // 2
+
+    positive = reddit_df[
+        reddit_df["sarcastic"] == 1
+    ].copy()
+
+    negative = reddit_df[
+        reddit_df["sarcastic"] == 0
+    ].copy()
+
+    rng = np.random.RandomState(seed)
+
+    positive_n = min(target_per_class, len(positive))
+    negative_n = min(target_per_class, len(negative))
+
+    positive = positive.sample(
+        n=positive_n,
+        random_state=rng,
+    )
+
+    negative = negative.sample(
+        n=negative_n,
+        random_state=rng,
+    )
+
+    reddit_df = pd.concat(
+        [positive, negative],
+        ignore_index=True,
+    )
+
+    # Shuffle after balancing.
+    reddit_df = reddit_df.sample(
+        frac=1.0,
+        random_state=seed,
+    ).reset_index(drop=True)
+
+    print("\n" + "=" * 60)
+    print("REDDIT SARCASM PRETRAINING DATA")
+    print("=" * 60)
+
+    print(f"Original valid Reddit samples: {before_dedup}")
+    print(f"Duplicate Reddit examples removed: {duplicate_count}")
+    print(f"Final Reddit samples: {len(reddit_df)}")
+
+    print("\nReddit binary distribution:")
+    print(
+        reddit_df["sarcastic"]
+        .value_counts()
+        .sort_index()
+    )
+
+    print("\nExample:")
+    print(reddit_df.iloc[0]["tweet"][:1000])
+    print(f"Label: {reddit_df.iloc[0]['sarcastic']}")
+
+    return reddit_df
+
 def load_additional_isarcasm_test_data(
     binary_test_csv=None,
     fine_test_csv=None,
@@ -1091,22 +1292,49 @@ def load_additional_isarcasm_test_data(
 
     return merged
 
+def remove_duplicate_tweets_against_reference(
+    source_df,
+    reference_df,
+):
+    """
+    Remove examples from source_df whose normalized text already
+    exists in reference_df.
+    """
 
-# def pretrain_general_adapter(
-#     train_csv=ISARCASM_TRAIN_PATH,
-#     model_name=MODEL_NAME,
-#     output_dir=GENERAL_ADAPTER_CHECKPOINT,
-#     max_length=ISARCASM_MAX_LENGTH,
-#     batch_size=ISARCASM_BATCH_SIZE,
-#     learning_rate=ISARCASM_LEARNING_RATE,
-#     weight_decay=ISARCASM_WEIGHT_DECAY,
-#     num_epochs=ISARCASM_EPOCHS,
-#     warmup_ratio=ISARCASM_WARMUP_RATIO,
-#     gradient_accumulation_steps=ISARCASM_GRADIENT_ACCUMULATION_STEPS,
-#     val_size=ISARCASM_VAL_RATIO,
-#     seed=42,
-#     num_workers=2,
-# ):
+    source = source_df.copy()
+    reference = reference_df.copy()
+
+    source["_normalized_text"] = (
+        source["tweet"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    reference_texts = set(
+        reference["tweet"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    before = len(source)
+
+    source = source[
+        ~source["_normalized_text"].isin(reference_texts)
+    ].copy()
+
+    source = source.drop(
+        columns=["_normalized_text"]
+    )
+
+    removed = before - len(source)
+
+    return source, removed
+
+
 def pretrain_general_adapter(
     train_csv=ISARCASM_TRAIN_PATH,
     additional_binary_test_csv=None,
@@ -1191,7 +1419,7 @@ def pretrain_general_adapter(
     )
 
     # --------------------------------------------------
-    # Load additional labeled iSarcasm data
+    # Load additional iSarcasm data
     # --------------------------------------------------
 
     additional_df = load_additional_isarcasm_test_data(
@@ -1199,10 +1427,43 @@ def pretrain_general_adapter(
         fine_test_csv=ISARCASM_TEST_ADDITIONAL_PATH,
     )
 
-    
+    # --------------------------------------------------
+    # Load Reddit shared-task sarcasm data
+    # --------------------------------------------------
+
+    # reddit_df = load_reddit_sarcasm_data(
+    #     jsonl_path=REDDIT_SARCASM_PATH,
+    #     max_samples=REDDIT_PRETRAIN_SAMPLES,
+    #     seed=seed,
+    # )
+    USE_REDDIT_DATASET = False 
+
+    if USE_REDDIT_DATASET:
+        reddit_df = load_reddit_sarcasm_data(
+            jsonl_path=REDDIT_SARCASM_PATH,
+            max_samples=REDDIT_PRETRAIN_SAMPLES,
+            seed=seed,
+        )
+    else:
+        reddit_df = pd.DataFrame(
+        columns=[
+            "tweet",
+            "sarcasm",
+            "sarcastic",
+            "rephrase",
+        ]
+    )
+        
+    print(f"Reddit dataset: {'USED' if USE_REDDIT_DATASET else 'SKIPPED'}")
+    print(f"Reddit samples: {len(reddit_df)}")
+
+    # ============================================================
+    # ADDITIONAL iSARCASM
+    # ============================================================
 
     if len(additional_df) > 0:
 
+        # Make sure the canonical columns exist.
         for col in [
             "tweet",
             "sarcastic",
@@ -1222,56 +1483,50 @@ def pretrain_general_adapter(
                         f"Additional data is missing '{col}'"
                     )
 
-        train_df = pd.concat(
+        # Keep only the columns used by ISarcasmDataset.
+        additional_df = additional_df[
             [
-                train_df,
-                additional_df[
-                    [
-                        "tweet",
-                        "sarcastic",
-                        "rephrase",
-                        "sarcasm",
-                    ]
-                ],
-            ],
-            ignore_index=True,
-        )
+                "tweet",
+                "sarcastic",
+                "rephrase",
+                "sarcasm",
+            ]
+        ].copy()
 
-        train_df["tweet"] = (
-            train_df["tweet"]
+        # Normalize text.
+        additional_df["tweet"] = (
+            additional_df["tweet"]
             .fillna("")
             .astype(str)
             .str.strip()
         )
 
-        before_dedup = len(train_df)
-
-        train_df = (
-            train_df
-            .drop_duplicates(
-                subset=["tweet"],
-                keep="first",
+        # Remove duplicates against the ORIGINAL iSarcasm
+        # training split.
+        additional_df, removed_additional = (
+            remove_duplicate_tweets_against_reference(
+                additional_df,
+                train_df,
             )
-            .reset_index(drop=True)
-        )
-
-        removed = (
-            before_dedup
-            - len(train_df)
         )
 
         print(
-            f"\nAdditional pretraining data added: "
+            f"\nAdditional iSarcasm data added: "
             f"{len(additional_df)}"
         )
 
         print(
-            f"Duplicate tweets removed: {removed}"
+            f"Additional iSarcasm duplicates removed: "
+            f"{removed_additional}"
         )
 
-        print(
-            f"Final pretraining samples: "
-            f"{len(train_df)}"
+        # Add additional iSarcasm to training.
+        train_df = pd.concat(
+            [
+                train_df,
+                additional_df,
+            ],
+            ignore_index=True,
         )
 
     else:
@@ -1280,6 +1535,140 @@ def pretrain_general_adapter(
             "\nNo additional iSarcasm test data supplied."
         )
 
+
+    # ============================================================
+    # REDDIT
+    # ============================================================
+
+    # Remove Reddit examples that duplicate ANY text already
+    # present in the iSarcasm training data.
+    reddit_df, removed_reddit = (
+        remove_duplicate_tweets_against_reference(
+            reddit_df,
+            train_df,
+        )
+    )
+
+    print(
+        f"\nReddit data added: {len(reddit_df)}"
+    )
+
+    print(
+        f"Reddit duplicates removed: {removed_reddit}"
+    )
+
+    # ------------------------------------------------------------
+    # Add Reddit to the SAME training dataframe.
+    #
+    # Reddit contributes:
+    #   sarcastic -> binary sarcasm loss
+    #
+    # Reddit has:
+    #   rephrase = ""
+    #   sarcasm   = NaN
+    #
+    # Therefore the existing masking in pretrain_one_epoch()
+    # automatically excludes Reddit from those two objectives.
+    # ------------------------------------------------------------
+
+    reddit_df = reddit_df[
+        [
+            "tweet",
+            "sarcastic",
+            "rephrase",
+            "sarcasm",
+        ]
+    ].copy()
+
+    train_df = pd.concat(
+        [
+            train_df,
+            reddit_df,
+        ],
+        ignore_index=True,
+    )
+
+    # ------------------------------------------------------------
+    # Final duplicate removal
+    # ------------------------------------------------------------
+
+    before_final_dedup = len(train_df)
+
+    train_df["tweet"] = (
+        train_df["tweet"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    train_df = (
+        train_df
+        .drop_duplicates(
+            subset=["tweet"],
+            keep="first",
+        )
+        .reset_index(drop=True)
+    )
+
+    final_duplicates_removed = (
+        before_final_dedup - len(train_df)
+    )
+
+    # ------------------------------------------------------------
+    # Shuffle final training data
+    # ------------------------------------------------------------
+
+    train_df = train_df.sample(
+        frac=1.0,
+        random_state=seed,
+    ).reset_index(drop=True)
+
+    # ============================================================
+    # FINAL DATASET SUMMARY
+    # ============================================================
+
+    print("\n" + "=" * 60)
+    print("FINAL GENERAL PRETRAINING DATA")
+    print("=" * 60)
+
+    print(
+        f"Original iSarcasm train: "
+        f"{len(train_df) - len(reddit_df) - len(additional_df)}"
+    )
+
+    print(
+        f"Additional iSarcasm:    "
+        f"{len(additional_df)}"
+    )
+
+    print(
+        f"Reddit:                 "
+        f"{len(reddit_df)}"
+    )
+
+    print(
+        f"Final duplicates removed: "
+        f"{final_duplicates_removed}"
+    )
+
+    print(
+        f"Final training size: "
+        f"{len(train_df)}"
+    )
+
+    print(
+        f"Validation size: "
+        f"{len(val_df)}"
+    )
+
+    print("\nFinal binary sarcasm distribution:")
+    print(
+        train_df["sarcastic"]
+        .value_counts()
+        .sort_index()
+    )
+
+  
     print(
         f"\nFinal training size: {len(train_df)}"
     )
