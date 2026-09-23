@@ -1,70 +1,63 @@
-name: Test CodaLab Python 3.7
+name: ALTA CodaLab Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-codalab:
+  alta-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Pull CodaLab Docker image
+      - name: Checkout ALTA project
+        uses: actions/checkout@v6
+
+      - name: Pull CodaLab image
         run: |
           docker pull codalab/codalab-legacy:py37
 
-      - name: Inspect CodaLab environment
+      - name: Show project files
         run: |
-          echo "========================================"
-          echo "CodaLab Docker environment"
-          echo "========================================"
+          echo "===== PROJECT ====="
+          find . -maxdepth 2 -type f | sort | head -200
 
-          echo ""
-          echo "Python:"
+      - name: Test ALTA inside CodaLab container
+        run: |
           docker run --rm \
-            codalab/codalab-legacy:py37 \
-            python --version
-
-          echo ""
-          echo "Python detailed version:"
-          docker run --rm \
-            codalab/codalab-legacy:py37 \
-            python -c "import sys; print(sys.version)"
-
-          echo ""
-          echo "Pip:"
-          docker run --rm \
-            codalab/codalab-legacy:py37 \
-            pip --version
-
-          echo ""
-          echo "========================================"
-          echo "Important ML packages"
-          echo "========================================"
-
-          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
             codalab/codalab-legacy:py37 \
             python -c "
-          modules = [
-              'torch',
-              'transformers',
-              'peft',
-              'tokenizers',
-              'sentencepiece',
-              'numpy',
-              'pandas',
-              'sklearn'
-          ]
+          import sys
+          print('Python:', sys.version)
 
-          for name in modules:
-              try:
-                  module = __import__(name)
-                  version = getattr(module, '__version__', 'unknown')
-                  print(name + ': OK - ' + str(version))
-              except Exception as e:
-                  print(name + ': FAIL - ' + repr(e))
+          print('--- Testing imports ---')
+
+          import torch
+          print('torch:', torch.__version__)
+
+          import transformers
+          print('transformers:', transformers.__version__)
+
+          try:
+              import peft
+              print('peft:', peft.__version__)
+          except Exception as e:
+              print('PEFT ERROR:', repr(e))
+
+          import tokenizers
+          print('tokenizers:', tokenizers.__version__)
+
+          import sentencepiece
+          print('sentencepiece: OK')
+
+          import pandas
+          print('pandas:', pandas.__version__)
+
+          import numpy
+          print('numpy:', numpy.__version__)
+
+          print('')
+          print('================================')
+          print('ALTA ENVIRONMENT TEST PASSED')
+          print('================================')
           "
-
-          echo ""
-          echo "========================================"
-          echo "DONE"
-          echo "========================================"
