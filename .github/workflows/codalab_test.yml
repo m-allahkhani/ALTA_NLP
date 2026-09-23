@@ -2,6 +2,9 @@ name: ALTA CodaLab Test
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   alta-test:
