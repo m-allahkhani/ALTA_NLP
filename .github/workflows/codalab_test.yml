@@ -11,26 +11,36 @@ jobs:
       - name: Checkout ALTA project
         uses: actions/checkout@v6
 
-      - name: Pull CodaLab image
+      - name: Build ALTA test Docker image
         run: |
-          docker pull codalab/codalab-legacy:py37
+          cat > Dockerfile.alta <<'EOF'
+          FROM codalab/codalab-legacy:py37
 
-      - name: Show project files
-        run: |
-          echo "===== PROJECT ====="
-          find . -maxdepth 2 -type f | sort | head -200
+          RUN pip install --no-cache-dir \
+              torch==1.13.1 \
+              transformers==4.30.2 \
+              tokenizers==0.13.3 \
+              sentencepiece \
+              pandas \
+              numpy \
+              scipy \
+              scikit-learn \
+              tqdm \
+              requests \
+              peft==0.4.0
+          EOF
 
-      - name: Test ALTA inside CodaLab container
+          docker build -f Dockerfile.alta -t alta-test .
+
+      - name: Test ALTA environment
         run: |
           docker run --rm \
             -v "$PWD:/workspace" \
             -w /workspace \
-            codalab/codalab-legacy:py37 \
+            alta-test \
             python -c "
           import sys
           print('Python:', sys.version)
-
-          print('--- Testing imports ---')
 
           import torch
           print('torch:', torch.__version__)
@@ -38,14 +48,11 @@ jobs:
           import transformers
           print('transformers:', transformers.__version__)
 
-          try:
-              import peft
-              print('peft:', peft.__version__)
-          except Exception as e:
-              print('PEFT ERROR:', repr(e))
-
           import tokenizers
           print('tokenizers:', tokenizers.__version__)
+
+          import peft
+          print('peft:', peft.__version__)
 
           import sentencepiece
           print('sentencepiece: OK')
@@ -55,6 +62,9 @@ jobs:
 
           import numpy
           print('numpy:', numpy.__version__)
+
+          import sklearn
+          print('sklearn: OK')
 
           print('')
           print('================================')
