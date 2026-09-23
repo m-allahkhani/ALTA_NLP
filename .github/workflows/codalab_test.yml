@@ -11,7 +11,7 @@ jobs:
       - name: Checkout ALTA project
         uses: actions/checkout@v6
 
-      - name: Build ALTA test Docker image
+            - name: Build ALTA test Docker image
         run: |
           cat > Dockerfile.alta <<'EOF'
           FROM codalab/codalab-legacy:py37
@@ -27,7 +27,7 @@ jobs:
               scikit-learn \
               tqdm \
               requests \
-              peft==0.4.0
+              peft==0.3.0
           EOF
 
           docker build -f Dockerfile.alta -t alta-test .
