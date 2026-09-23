@@ -94,7 +94,7 @@ SEED = 42
 
 train_path = f"train.csv" 
 valid_path = f"valid.csv"
-test_path = f"answer.csv" 
+test_path = f"test.csv" 
 
 # MODEL_NAME = "microsoft/deberta-v3-base"
 MODEL_NAME = "microsoft/deberta-v3-large"
