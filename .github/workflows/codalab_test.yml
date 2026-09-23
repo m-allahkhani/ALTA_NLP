@@ -1,0 +1,50 @@
+name: Test CodaLab Python 3.7
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-codalab:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull CodaLab Docker image
+        run: |
+          docker pull codalab/codalab-legacy:py37
+
+      - name: Inspect CodaLab environment
+        run: |
+          docker run --rm \
+            codalab/codalab-legacy:py37 \
+            python -c "
+          import sys
+          print('==============================')
+          print('Python version:')
+          print(sys.version)
+          print('==============================')
+
+          modules = [
+              'torch',
+              'transformers',
+              'peft',
+              'tokenizers',
+              'sentencepiece',
+              'numpy',
+              'pandas',
+              'sklearn'
+          ]
+
+          print('Installed packages:')
+          print('==============================')
+
+          for name in modules:
+              try:
+                  module = __import__(name)
+                  print(
+                      name,
+                      'OK',
+                      getattr(module, '__version__', 'version unknown')
+                  )
+              except Exception as e:
+                  print(name, 'FAIL:', repr(e))
+          "
