@@ -1,0 +1,76 @@
+name: ALTA CodaLab Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  alta-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout ALTA project
+        uses: actions/checkout@v6
+
+            - name: Build ALTA test Docker image
+        run: |
+          cat > Dockerfile.alta <<'EOF'
+          FROM codalab/codalab-legacy:py37
+
+          RUN pip install --no-cache-dir \
+              torch==1.13.1 \
+              transformers==4.30.2 \
+              tokenizers==0.13.3 \
+              sentencepiece \
+              pandas \
+              numpy \
+              scipy \
+              scikit-learn \
+              tqdm \
+              requests \
+              peft==0.3.0
+          EOF
+
+          docker build -f Dockerfile.alta -t alta-test .
+
+      - name: Test ALTA environment
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            alta-test \
+            python -c "
+          import sys
+          print('Python:', sys.version)
+
+          import torch
+          print('torch:', torch.__version__)
+
+          import transformers
+          print('transformers:', transformers.__version__)
+
+          import tokenizers
+          print('tokenizers:', tokenizers.__version__)
+
+          import peft
+          print('peft:', peft.__version__)
+
+          import sentencepiece
+          print('sentencepiece: OK')
+
+          import pandas
+          print('pandas:', pandas.__version__)
+
+          import numpy
+          print('numpy:', numpy.__version__)
+
+          import sklearn
+          print('sklearn: OK')
+
+          print('')
+          print('================================')
+          print('ALTA ENVIRONMENT TEST PASSED')
+          print('================================')
+          "
