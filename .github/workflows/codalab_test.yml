@@ -14,15 +14,36 @@ jobs:
 
       - name: Inspect CodaLab environment
         run: |
+          echo "========================================"
+          echo "CodaLab Docker environment"
+          echo "========================================"
+
+          echo ""
+          echo "Python:"
+          docker run --rm \
+            codalab/codalab-legacy:py37 \
+            python --version
+
+          echo ""
+          echo "Python detailed version:"
+          docker run --rm \
+            codalab/codalab-legacy:py37 \
+            python -c "import sys; print(sys.version)"
+
+          echo ""
+          echo "Pip:"
+          docker run --rm \
+            codalab/codalab-legacy:py37 \
+            pip --version
+
+          echo ""
+          echo "========================================"
+          echo "Important ML packages"
+          echo "========================================"
+
           docker run --rm \
             codalab/codalab-legacy:py37 \
             python -c "
-          import sys
-          print('==============================')
-          print('Python version:')
-          print(sys.version)
-          print('==============================')
-
           modules = [
               'torch',
               'transformers',
@@ -34,17 +55,16 @@ jobs:
               'sklearn'
           ]
 
-          print('Installed packages:')
-          print('==============================')
-
           for name in modules:
               try:
                   module = __import__(name)
-                  print(
-                      name,
-                      'OK',
-                      getattr(module, '__version__', 'version unknown')
-                  )
+                  version = getattr(module, '__version__', 'unknown')
+                  print(name + ': OK - ' + str(version))
               except Exception as e:
-                  print(name, 'FAIL:', repr(e))
+                  print(name + ': FAIL - ' + repr(e))
           "
+
+          echo ""
+          echo "========================================"
+          echo "DONE"
+          echo "========================================"
