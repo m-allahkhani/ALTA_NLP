@@ -92,16 +92,12 @@ def parse_args():
 
 SEED = 42
 
-# train_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\train.csv"
-# test_path = "E:\\PROJECTS\\Alta2026\\Project\\data\\official_data\\valid.csv" 
-# train_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//train.csv" 
-# test_path = f"/kaggle//input//datasets//maryamallahkhani//official-alta-dataset//valid.csv" 
 train_path = f"train.csv" 
-test_path = f"valid.csv" 
+valid_path = f"valid.csv"
+test_path = f"answer.csv" 
 
-MODEL_NAME = (
-    "microsoft/deberta-v3-base"
-)
+# MODEL_NAME = "microsoft/deberta-v3-base"
+MODEL_NAME = "microsoft/deberta-v3-large"
 
 
 # ============================================================
@@ -112,9 +108,15 @@ ISARCASM_TRAIN_PATH =  "iSarcasmEval_train.csv"
 ISARCASM_TEST_BINARY_PATH = "iSarcasmEvalTest_task_A_En_test.csv"
 ISARCASM_TEST_ADDITIONAL_PATH = "iSarcasmEvalTest_task_B_En_test.csv"
 
+USE_ISARCASM_PRETRAINING = False
+USE_REDDIT_PRETRAINING =  True 
+
+USE_REDDIT_DATASET = False 
+
 
 # Reddit shared-task sarcasm data
 REDDIT_SARCASM_PATH = "sarcasm_detection_shared_task_reddit_training.jsonl"
+REDDIT_SARCASM_PATH_2 = "sarcasm_detection_shared_task_reddit_testing.jsonl"
 
 # Start with 2,000 Reddit samples for a controlled experiment.
 # The dataset is approximately balanced, so we take 1,000 per class.
@@ -150,7 +152,6 @@ ISARCASM_GAMMA = 2.0
 
 ISARCASM_MIN_DELTA = 0.0005
 
-USE_ISARCASM_PRETRAINING = True
 
 
 #######################################
@@ -542,28 +543,48 @@ def initialize_sarcasm_adapters_from_pretrained(
     # Required sanity check
     # ============================================================
 
-    if transferred_au != 72:
+    # ============================================================
+    # Determine expected transfer count dynamically
+    # ============================================================
+    # The checkpoint stores two tensors per target module
+    # (lora_A and lora_B). Both are copied.
+    expected_per_adapter = len(
+        [
+            k for k in pretrained_state
+            if "lora_A.general." in k or "lora_B.general." in k
+        ]
+    )
+
+    if expected_per_adapter == 0:
         raise RuntimeError(
-            "Expected 72 LoRA tensors for sarcasm_au, "
-            f"but transferred {transferred_au}."
+            "No general LoRA tensors were found in the "
+            "pretrained checkpoint. Did you load the right file?"
         )
 
-    if transferred_uk != 72:
+    # ============================================================
+    # Sanity checks
+    # ============================================================
+
+    if transferred_au != expected_per_adapter:
         raise RuntimeError(
-            "Expected 72 LoRA tensors for sarcasm_uk, "
-            f"but transferred {transferred_uk}."
+            f"Expected {expected_per_adapter} LoRA tensors "
+            f"for sarcasm_au, but transferred {transferred_au}."
+        )
+
+    if transferred_uk != expected_per_adapter:
+        raise RuntimeError(
+            f"Expected {expected_per_adapter} LoRA tensors "
+            f"for sarcasm_uk, but transferred {transferred_uk}."
         )
 
     print(
-        "✓ 72/72 iSarcasm LoRA tensors copied to sarcasm_au."
+        f"✓ {expected_per_adapter}/{expected_per_adapter} "
+        f"iSarcasm LoRA tensors copied to sarcasm_au."
     )
 
     print(
-        "✓ 72/72 iSarcasm LoRA tensors copied to sarcasm_uk."
-    )
-
-    print(
-        "✓ Sentiment adapters were left untouched."
+        f"✓ {expected_per_adapter}/{expected_per_adapter} "
+        f"iSarcasm LoRA tensors copied to sarcasm_uk."
     )
 
     return model
@@ -769,6 +790,8 @@ def train_one_epoch(
         )
 
         loss.backward()
+        
+
         # ==================================================
         # Optimizer step
         # ==================================================
@@ -786,11 +809,11 @@ def train_one_epoch(
             )
 
             optimizer.step()
-            print_adapter_gradient_stats(model)
-            print(
-                f"Before optimizer step: "
-                f"loss={total_batch_loss.item():.6f}"
-            )
+            # print_adapter_gradient_stats(model)
+            # print(
+            #     f"Before optimizer step: "
+            #     f"loss={total_batch_loss.item():.6f}"
+            # )
             # ============================================================
             # DEBUG: CHECK PARAMETERS AFTER OPTIMIZER STEP
             # ============================================================
@@ -803,19 +826,19 @@ def train_one_epoch(
 
                     bad_parameters.append(name)
 
-            print(
-                f"After optimizer step: "
-                f"bad_parameters={len(bad_parameters)}"
-            )
+            # print(
+            #     f"After optimizer step: "
+            #     f"bad_parameters={len(bad_parameters)}"
+            # )
 
             if bad_parameters:
 
-                print("First non-finite parameters:")
+                # print("First non-finite parameters:")
 
-                for name in bad_parameters[:20]:
-                    print(
-                        f"  {name}"
-                    )
+                # for name in bad_parameters[:20]:
+                #     print(
+                #         f"  {name}"
+                #     )
 
                 raise RuntimeError(
                     "Non-finite parameter detected after optimizer.step()."
@@ -857,33 +880,25 @@ def train_one_epoch(
 
 from sklearn.model_selection import train_test_split
 from transformers import get_linear_schedule_with_warmup
-
 def load_reddit_sarcasm_data(
     jsonl_path,
-    max_samples=2000,
+    max_samples=None,
     seed=42,
 ):
     """
     Load the Reddit shared-task sarcasm dataset.
 
-    Expected JSONL format:
-    {
-        "label": "SARCASM" or "NOT_SARCASM",
-        "response": "...",
-        "context": ["...", "...", ...]
-    }
-
-    Output uses the same canonical schema as the iSarcasm
-    pretraining dataset:
-
+    Output schema:
         tweet
         sarcastic
         rephrase
         sarcasm
 
-    Reddit provides only binary sarcasm supervision, so:
+    Reddit provides only binary sarcasm supervision:
         rephrase = ""
         sarcasm = NaN
+
+    max_samples=None means use ALL valid Reddit examples.
     """
 
     if not os.path.exists(jsonl_path):
@@ -894,7 +909,9 @@ def load_reddit_sarcasm_data(
     rows = []
 
     with open(jsonl_path, "r", encoding="utf-8") as f:
+
         for line_number, line in enumerate(f, start=1):
+
             line = line.strip()
 
             if not line:
@@ -902,16 +919,26 @@ def load_reddit_sarcasm_data(
 
             try:
                 item = json.loads(line)
+
             except json.JSONDecodeError as e:
-                print(
-                    f"Warning: could not parse line {line_number}: {e}"
-                )
+                # print(
+                #     f"Warning: could not parse line "
+                #     f"{line_number}: {e}"
+                # )
                 continue
 
-            label = str(item.get("label", "")).strip().upper()
-            response = str(item.get("response", "")).strip()
+            label = str(
+                item.get("label", "")
+            ).strip().upper()
 
-            context = item.get("context", [])
+            response = str(
+                item.get("response", "")
+            ).strip()
+
+            context = item.get(
+                "context",
+                [],
+            )
 
             if not isinstance(context, list):
                 context = [str(context)]
@@ -922,34 +949,44 @@ def load_reddit_sarcasm_data(
                 if str(x).strip()
             ]
 
-            if label not in {"SARCASM", "NOT_SARCASM"}:
+            if label not in {
+                "SARCASM",
+                "NOT_SARCASM",
+            }:
                 continue
 
             if not response:
                 continue
 
-            # IMPORTANT:
-            # Put the target response FIRST because MAX_LENGTH=128.
-            # This ensures the response is preserved if truncation occurs.
-            #
-            # Keep the most recent context turns because they are generally
-            # the most relevant to interpreting the response.
+            # Keep target response first because
+            # MAX_LENGTH=128 may truncate the end.
             recent_context = context[-2:]
 
             if recent_context:
+
                 context_text = "\n".join(
                     f"Context {i + 1}: {text}"
-                    for i, text in enumerate(recent_context)
+                    for i, text in enumerate(
+                        recent_context
+                    )
                 )
 
                 combined_text = (
                     f"Response: {response}\n"
                     f"{context_text}"
                 )
-            else:
-                combined_text = f"Response: {response}"
 
-            sarcastic = 1 if label == "SARCASM" else 0
+            else:
+
+                combined_text = (
+                    f"Response: {response}"
+                )
+
+            sarcastic = (
+                1
+                if label == "SARCASM"
+                else 0
+            )
 
             rows.append(
                 {
@@ -962,12 +999,15 @@ def load_reddit_sarcasm_data(
 
     reddit_df = pd.DataFrame(rows)
 
-    if len(reddit_df) == 0:
+    if reddit_df.empty:
         raise ValueError(
             "No valid Reddit sarcasm examples were loaded."
         )
 
-    # Remove exact duplicate texts.
+    # --------------------------------------------------
+    # Remove exact duplicate texts
+    # --------------------------------------------------
+
     before_dedup = len(reddit_df)
 
     reddit_df["tweet_normalized"] = (
@@ -978,64 +1018,71 @@ def load_reddit_sarcasm_data(
         .str.lower()
     )
 
-    reddit_df = reddit_df.drop_duplicates(
-        subset=["tweet_normalized"]
-    ).drop(columns=["tweet_normalized"])
-
-    duplicate_count = before_dedup - len(reddit_df)
-
-    # ------------------------------------------------------------------
-    # Balanced sampling
-    # ------------------------------------------------------------------
-    # We want 1,000 SARCASM + 1,000 NOT_SARCASM for the first experiment.
-    # This prevents the external dataset from changing the class balance.
-    # ------------------------------------------------------------------
-
-    target_per_class = max_samples // 2
-
-    positive = reddit_df[
-        reddit_df["sarcastic"] == 1
-    ].copy()
-
-    negative = reddit_df[
-        reddit_df["sarcastic"] == 0
-    ].copy()
-
-    rng = np.random.RandomState(seed)
-
-    positive_n = min(target_per_class, len(positive))
-    negative_n = min(target_per_class, len(negative))
-
-    positive = positive.sample(
-        n=positive_n,
-        random_state=rng,
+    reddit_df = (
+        reddit_df
+        .drop_duplicates(
+            subset=["tweet_normalized"],
+            keep="first",
+        )
+        .drop(
+            columns=["tweet_normalized"]
+        )
+        .reset_index(drop=True)
     )
 
-    negative = negative.sample(
-        n=negative_n,
-        random_state=rng,
+    duplicate_count = (
+        before_dedup - len(reddit_df)
     )
 
-    reddit_df = pd.concat(
-        [positive, negative],
-        ignore_index=True,
-    )
+    # --------------------------------------------------
+    # Optional maximum sample limit
+    # --------------------------------------------------
 
-    # Shuffle after balancing.
+    if (
+        max_samples is not None
+        and max_samples > 0
+        and len(reddit_df) > max_samples
+    ):
+
+        reddit_df = reddit_df.sample(
+            n=max_samples,
+            random_state=seed,
+        ).reset_index(drop=True)
+
+    # --------------------------------------------------
+    # Shuffle
+    # --------------------------------------------------
+
     reddit_df = reddit_df.sample(
         frac=1.0,
         random_state=seed,
     ).reset_index(drop=True)
 
+    # --------------------------------------------------
+    # Summary
+    # --------------------------------------------------
+
     print("\n" + "=" * 60)
     print("REDDIT SARCASM PRETRAINING DATA")
     print("=" * 60)
 
-    print(f"Original valid Reddit samples: {before_dedup}")
-    print(f"Duplicate Reddit examples removed: {duplicate_count}")
-    print(f"Final Reddit samples: {len(reddit_df)}")
+    print(
+        f"Original valid Reddit samples: "
+        f"{before_dedup}"
+    )
+
+    print(
+        f"Duplicate Reddit examples removed: "
+        f"{duplicate_count}"
+    )
+
+    print(
+        f"Final Reddit samples: "
+        f"{len(reddit_df)}"
+    )
 
     print("\nReddit binary distribution:")
+
     print(
         reddit_df["sarcastic"]
         .value_counts()
@@ -1043,10 +1090,474 @@ def load_reddit_sarcasm_data(
     )
 
     print("\nExample:")
-    print(reddit_df.iloc[0]["tweet"][:1000])
-    print(f"Label: {reddit_df.iloc[0]['sarcastic']}")
+
+    print(
+        reddit_df.iloc[0]["tweet"][:1000]
+    )
+
+    print(
+        f"Label: "
+        f"{reddit_df.iloc[0]['sarcastic']}"
+    )
 
     return reddit_df
+
+def pretrain_reddit_general_adapter(
+    reddit_jsonl_path=REDDIT_SARCASM_PATH,
+    reddit_jsonl_path_2=REDDIT_SARCASM_PATH_2,
+    model_name=MODEL_NAME,
+    output_dir=GENERAL_ADAPTER_CHECKPOINT,
+    max_length=ISARCASM_MAX_LENGTH,
+    batch_size=ISARCASM_BATCH_SIZE,
+    learning_rate=ISARCASM_LEARNING_RATE,
+    weight_decay=ISARCASM_WEIGHT_DECAY,
+    num_epochs=ISARCASM_EPOCHS,
+    warmup_ratio=ISARCASM_WARMUP_RATIO,
+    gradient_accumulation_steps=ISARCASM_GRADIENT_ACCUMULATION_STEPS,
+    val_size=ISARCASM_VAL_RATIO,
+    seed=SEED,
+    num_workers=2,
+):
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True,
+    )
+
+    # ============================================================
+    # REPRODUCIBILITY
+    # ============================================================
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # ============================================================
+    # LOAD ALL REDDIT DATA
+    # ============================================================
+
+    reddit_df_train = load_reddit_sarcasm_data(
+        jsonl_path=reddit_jsonl_path,
+        max_samples=None,
+        seed=seed,
+    )
+    reddit_df_test = load_reddit_sarcasm_data(
+            jsonl_path=reddit_jsonl_path_2,
+            max_samples=None,
+            seed=seed,
+        )
+
+    reddit_df = pd.concat([reddit_df_train, reddit_df_test], ignore_index=True)
+    reddit_df = reddit_df.drop_duplicates(subset=["text"], keep="first").reset_index(drop=True)
+
+    print("\n" + "=" * 60)
+    print("REDDIT-ONLY GENERAL ADAPTER PRETRAINING")
+    print("=" * 60)
+
+    print(
+        f"Total Reddit samples: "
+        f"{len(reddit_df)}"
+    )
+
+    # ============================================================
+    # SPLIT REDDIT INTO TRAIN / VALIDATION
+    # ============================================================
+
+    train_df, val_df = train_test_split(
+        reddit_df,
+        test_size=val_size,
+        random_state=seed,
+        stratify=reddit_df["sarcastic"],
+    )
+
+    train_df = (
+        train_df
+        .reset_index(drop=True)
+    )
+
+    val_df = (
+        val_df
+        .reset_index(drop=True)
+    )
+
+    print(
+        f"Reddit training samples: "
+        f"{len(train_df)}"
+    )
+
+    print(
+        f"Reddit validation samples: "
+        f"{len(val_df)}"
+    )
+
+    print("\nTraining distribution:")
+
+    print(
+        train_df["sarcastic"]
+        .value_counts()
+        .sort_index()
+    )
+
+    print("\nValidation distribution:")
+
+    print(
+        val_df["sarcastic"]
+        .value_counts()
+        .sort_index()
+    )
+
+    # ============================================================
+    # TOKENIZER
+    # ============================================================
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name
+    )
+
+    # ============================================================
+    # DATASETS
+    # ============================================================
+
+    train_dataset = ISarcasmDataset(
+        train_df,
+        tokenizer,
+        max_length=max_length,
+    )
+
+    val_dataset = ISarcasmDataset(
+        val_df,
+        tokenizer,
+        max_length=max_length,
+    )
+
+    # ============================================================
+    # DATALOADERS
+    # ============================================================
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    # ============================================================
+    # DEVICE
+    # ============================================================
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    print(
+        f"\nDevice: {device}"
+    )
+
+    if torch.cuda.is_available():
+
+        print(
+            f"GPU: "
+            f"{torch.cuda.get_device_name(0)}"
+        )
+
+    # ============================================================
+    # MODEL
+    # ============================================================
+
+    model = GeneralSarcasmPretrainModel(
+        model_name=model_name,
+        lora_r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        dropout=0.1,
+    )
+
+    model.to(device)
+
+    model.encoder.print_trainable_parameters()
+
+    # ============================================================
+    # BINARY CLASS WEIGHTS
+    # ============================================================
+
+    binary_counts = (
+        train_df["sarcastic"]
+        .value_counts()
+        .sort_index()
+    )
+
+    n_negative = int(
+        binary_counts.get(0, 1)
+    )
+
+    n_positive = int(
+        binary_counts.get(1, 1)
+    )
+
+    class_weights = torch.tensor(
+        [
+            1.0,
+            n_negative / max(
+                n_positive,
+                1,
+            ),
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    binary_loss_fn = nn.CrossEntropyLoss(
+        weight=class_weights
+    )
+
+    # print(
+    #     f"\nBinary class weights: "
+    #     f"{class_weights.detach().cpu().numpy()}"
+    # )
+
+    # ============================================================
+    # NO FINE-GRAINED / REPHRASE SUPERVISION
+    # ============================================================
+
+    print(
+        "\nReddit provides only binary sarcasm labels."
+    )
+
+    print(
+        "Rephrase loss: DISABLED"
+    )
+
+    print(
+        "Fine sarcasm loss: DISABLED"
+    )
+
+    # ============================================================
+    # OPTIMIZER
+    # ============================================================
+
+    trainable_params = [
+        p
+        for p in model.parameters()
+        if p.requires_grad
+    ]
+
+    optimizer = torch.optim.AdamW(
+        trainable_params,
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        eps=1e-6,
+    )
+
+    # ============================================================
+    # SCHEDULER
+    # ============================================================
+
+    steps_per_epoch = max(
+        1,
+        (
+            len(train_loader)
+            + gradient_accumulation_steps
+            - 1
+        )
+        // gradient_accumulation_steps,
+    )
+
+    total_steps = (
+        steps_per_epoch
+        * num_epochs
+    )
+
+    warmup_steps = int(
+        total_steps
+        * warmup_ratio
+    )
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+
+    # ============================================================
+    # TRAINING
+    # ============================================================
+
+    best_f1 = -1.0
+    best_epoch = -1
+
+    for epoch in range(
+        1,
+        num_epochs + 1,
+    ):
+
+        # --------------------------------------------------------
+        # IMPORTANT:
+        #
+        # Reddit has ONLY binary labels.
+        #
+        # Therefore:
+        #   binary_weight = 1.0
+        #   rephrase_weight = 0.0
+        #   fine_weight = 0.0
+        #
+        # --------------------------------------------------------
+
+        train_metrics = pretrain_one_epoch(
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            binary_loss_fn=binary_loss_fn,
+            fine_pos_weight=1.0,
+            contrastive_loss_fn=None,
+            binary_weight=1.0,
+            rephrase_weight=0.0,
+            fine_weight=0.0,
+            gradient_accumulation_steps=(
+                gradient_accumulation_steps
+            ),
+        )
+
+        val_metrics = evaluate_isarcasm(
+            model,
+            val_loader,
+            device,
+        )
+
+        print(
+            f"\nEpoch {epoch}/{num_epochs}"
+        )
+
+        print(
+            f"Train Loss: "
+            f"{train_metrics['loss']:.4f}"
+        )
+
+        print(
+            f"  Binary: "
+            f"{train_metrics['binary_loss']:.4f}"
+        )
+
+        print(
+            f"  Rephrase: "
+            f"{train_metrics['rephrase_loss']:.4f}"
+        )
+
+        print(
+            f"  Fine sarcasm: "
+            f"{train_metrics['fine_loss']:.4f}"
+        )
+
+        print(
+            f"Validation Macro F1: "
+            f"{val_metrics['macro_f1']:.4f}"
+        )
+
+        print(
+            f"Validation Positive F1: "
+            f"{val_metrics['positive_f1']:.4f}"
+        )
+
+        # ========================================================
+        # SAVE BEST REDDIT ADAPTER
+        # ========================================================
+
+        if (
+            val_metrics["macro_f1"]
+            > best_f1
+        ):
+
+            best_f1 = (
+                val_metrics["macro_f1"]
+            )
+
+            best_epoch = epoch
+
+            checkpoint_path = os.path.join(
+                output_dir,
+                "best_general_adapter.pt",
+            )
+
+            torch.save(
+                {
+                    "model_state_dict":
+                        model.state_dict(),
+
+                    "best_f1":
+                        best_f1,
+
+                    "best_epoch":
+                        best_epoch,
+
+                    "model_name":
+                        model_name,
+
+                    "pretraining_dataset":
+                        "reddit_only",
+
+                    "training_samples":
+                        len(train_df),
+
+                    "validation_samples":
+                        len(val_df),
+                },
+                checkpoint_path,
+            )
+
+            print(
+                f"✓ Saved best Reddit model → "
+                f"{checkpoint_path}"
+            )
+
+    # ============================================================
+    # FINAL SUMMARY
+    # ============================================================
+
+    print("\n" + "=" * 60)
+    print("REDDIT-ONLY PRETRAINING COMPLETE")
+    print("=" * 60)
+
+    print(
+        f"Best validation Macro F1: "
+        f"{best_f1:.4f}"
+    )
+
+    print(
+        f"Best epoch: "
+        f"{best_epoch}"
+    )
+
+    print(
+        f"Training samples: "
+        f"{len(train_df)}"
+    )
+
+    print(
+        f"Validation samples: "
+        f"{len(val_df)}"
+    )
+
+    print(
+        f"Checkpoint: "
+        f"{os.path.join(output_dir, 'best_general_adapter.pt')}"
+    )
+
+    return model, tokenizer
 
 def load_additional_isarcasm_test_data(
     binary_test_csv=None,
@@ -1335,7 +1846,7 @@ def remove_duplicate_tweets_against_reference(
     return source, removed
 
 
-def pretrain_general_adapter(
+def sarcasm_pretrain_general_adapter(
     train_csv=ISARCASM_TRAIN_PATH,
     additional_binary_test_csv=None,
     additional_fine_test_csv=None,
@@ -1436,7 +1947,7 @@ def pretrain_general_adapter(
     #     max_samples=REDDIT_PRETRAIN_SAMPLES,
     #     seed=seed,
     # )
-    USE_REDDIT_DATASET = False 
+    
 
     if USE_REDDIT_DATASET:
         reddit_df = load_reddit_sarcasm_data(
@@ -1779,10 +2290,10 @@ def pretrain_general_adapter(
         train_df
     )
 
-    print(
-        f"Fine sarcasm pos_weight: "
-        f"{fine_pos_weight:.4f}"
-    )
+    # print(
+    #     f"Fine sarcasm pos_weight: "
+    #     f"{fine_pos_weight:.4f}"
+    # )
 
     # --------------------------------------------------
     # Contrastive loss
@@ -2428,7 +2939,7 @@ def evaluate(
     # --------------------------------------------------
     # Evaluation loop
     # --------------------------------------------------
-
+    all_sarcasm_probs = []
     for batch in dataloader:
 
         input_ids = batch["input_ids"].to(DEVICE)
@@ -2570,6 +3081,11 @@ def evaluate(
             sarcasm_logits,
             dim=1
         )
+        sarcasm_positive_probs = torch.softmax(
+            sarcasm_logits,
+            dim=1
+        )[:, 1]
+        all_sarcasm_probs.extend(sarcasm_positive_probs.cpu().numpy())
 
         # Move to CPU / NumPy
         variety_ids_cpu = (
@@ -2649,7 +3165,15 @@ def evaluate(
     # ==================================================
     # Calculate dialect-specific Macro F1
     # ==================================================
+    print(
+        f"Sarcasm positive probability mean: "
+        f"{np.mean(all_sarcasm_probs):.4f}"
+    )
 
+    print(
+        f"Sarcasm positive probability std: "
+        f"{np.std(all_sarcasm_probs):.4f}"
+    )
     sentiment_au_metrics = calculate_metrics(
         sentiment_labels_au,
         sentiment_predictions_au
@@ -2750,12 +3274,162 @@ def evaluate(
 
         "official_score": official_score
     }
+# @torch.no_grad()
+# def predict_ensemble(
+#     models,
+#     dataloader
+# ):
+    
+#     for model in models:
+#         model.eval()
+
+#     varieties = []
+
+#     sentiment_labels_all = []
+#     sarcasm_labels_all = []
+
+#     sentiment_logits_all_models = []
+#     sarcasm_logits_all_models = []
+
+    
+#     for model_index, model in enumerate(models):
+
+#         sentiment_logits_model = []
+#         sarcasm_logits_model = []
+
+#         sentiment_labels_model = []
+#         sarcasm_labels_model = []
+
+#         varieties_model = []
+
+#         for batch in dataloader:
+
+#             input_ids = batch[
+#                 "input_ids"
+#             ].to(DEVICE)
+
+#             attention_mask = batch[
+#                 "attention_mask"
+#             ].to(DEVICE)
+
+#             variety_ids = batch[
+#                 "variety_ids"
+#             ].to(DEVICE)
+
+#             sentiment_labels = batch[
+#                 "sentiment_labels"
+#             ].to(DEVICE)
+
+#             sarcasm_labels = batch[
+#                 "sarcasm_labels"
+#             ].to(DEVICE)
+
+#             outputs = model(
+#                 input_ids=input_ids,
+#                 attention_mask=attention_mask,
+#                 variety_ids=variety_ids
+#             )
+
+#             sentiment_logits_model.append(
+#                 outputs[
+#                     "sentiment_logits"
+#                 ].cpu()
+#             )
+
+#             sarcasm_logits_model.append(
+#                 outputs[
+#                     "sarcasm_logits"
+#                 ].cpu()
+#             )
+
+#             sentiment_labels_model.extend(
+#                 sentiment_labels.cpu().numpy()
+#             )
+
+#             sarcasm_labels_model.extend(
+#                 sarcasm_labels.cpu().numpy()
+#             )
+
+#             varieties_model.extend(
+#                 batch["variety"]
+#             )
+
+#         sentiment_logits_model = torch.cat(
+#             sentiment_logits_model,
+#             dim=0
+#         )
+
+#         sarcasm_logits_model = torch.cat(
+#             sarcasm_logits_model,
+#             dim=0
+#         )
+
+#         sentiment_logits_all_models.append(
+#             sentiment_logits_model
+#         )
+
+#         sarcasm_logits_all_models.append(
+#             sarcasm_logits_model
+#         )
+
+#         if model_index == 0:
+
+#             sentiment_labels_all = (
+#                 sentiment_labels_model
+#             )
+
+#             sarcasm_labels_all = (
+#                 sarcasm_labels_model
+#             )
+
+#             varieties = varieties_model
+
+ 
+
+#     sentiment_logits_ensemble = torch.stack(
+#         sentiment_logits_all_models,
+#         dim=0
+#     ).mean(dim=0)
+
+#     sarcasm_logits_ensemble = torch.stack(
+#         sarcasm_logits_all_models,
+#         dim=0
+#     ).mean(dim=0)
+
+
+#     sentiment_predictions = torch.argmax(
+#         sentiment_logits_ensemble,
+#         dim=1
+#     ).numpy()
+
+#     sarcasm_predictions = torch.argmax(
+#         sarcasm_logits_ensemble,
+#         dim=1
+#     ).numpy()
+
+#     return {
+#         "varieties": varieties,
+
+#         "sentiment_labels":
+#             sentiment_labels_all,
+
+#         "sentiment_predictions":
+#             sentiment_predictions,
+
+#         "sarcasm_labels":
+#             sarcasm_labels_all,
+
+#         "sarcasm_predictions":
+#             sarcasm_predictions
+#     }
+
+
 @torch.no_grad()
 def predict_ensemble(
     models,
     dataloader
 ):
-    
+
     for model in models:
         model.eval()
 
@@ -2767,7 +3441,6 @@ def predict_ensemble(
     sentiment_logits_all_models = []
     sarcasm_logits_all_models = []
 
-    
     for model_index, model in enumerate(models):
 
         sentiment_logits_model = []
@@ -2807,15 +3480,11 @@ def predict_ensemble(
             )
 
             sentiment_logits_model.append(
-                outputs[
-                    "sentiment_logits"
-                ].cpu()
+                outputs["sentiment_logits"].cpu()
             )
 
             sarcasm_logits_model.append(
-                outputs[
-                    "sarcasm_logits"
-                ].cpu()
+                outputs["sarcasm_logits"].cpu()
             )
 
             sentiment_labels_model.extend(
@@ -2860,7 +3529,9 @@ def predict_ensemble(
 
             varieties = varieties_model
 
- 
+    # ==================================================
+    # Average logits across folds
+    # ==================================================
 
     sentiment_logits_ensemble = torch.stack(
         sentiment_logits_all_models,
@@ -2872,6 +3543,34 @@ def predict_ensemble(
         dim=0
     ).mean(dim=0)
 
+    # ==================================================
+    # Probabilities
+    # ==================================================
+
+    sentiment_probabilities = torch.softmax(
+        sentiment_logits_ensemble,
+        dim=1
+    )
+
+    sarcasm_probabilities = torch.softmax(
+        sarcasm_logits_ensemble,
+        dim=1
+    )
+
+    # Probability of positive class
+    sentiment_positive_probs = (
+        sentiment_probabilities[:, 1]
+        .numpy()
+    )
+
+    sarcasm_positive_probs = (
+        sarcasm_probabilities[:, 1]
+        .numpy()
+    )
+
+    # ==================================================
+    # Default predictions
+    # ==================================================
 
     sentiment_predictions = torch.argmax(
         sentiment_logits_ensemble,
@@ -2884,25 +3583,41 @@ def predict_ensemble(
     ).numpy()
 
     return {
-        "varieties": varieties,
+
+        "varieties":
+            varieties,
 
         "sentiment_labels":
-            sentiment_labels_all,
+            np.asarray(sentiment_labels_all),
 
         "sentiment_predictions":
             sentiment_predictions,
 
         "sarcasm_labels":
-            sarcasm_labels_all,
+            np.asarray(sarcasm_labels_all),
 
         "sarcasm_predictions":
-            sarcasm_predictions
+            sarcasm_predictions,
+
+        # NEW
+        "sentiment_positive_probs":
+            sentiment_positive_probs,
+
+        "sarcasm_positive_probs":
+            sarcasm_positive_probs,
+
+        # Keep logits too
+        "sentiment_logits":
+            sentiment_logits_ensemble.numpy(),
+
+        "sarcasm_logits":
+            sarcasm_logits_ensemble.numpy()
     }
-
-
 
 import re
 import unicodedata
+
+
 
 
 def preprocess_text(text):
@@ -3133,12 +3848,12 @@ def print_lora_adapter_norms(model):
         if not param.requires_grad:
             continue
 
-        print(
-            f"{name:<100} "
-            f"norm={param.detach().float().norm().item():.8f}"
-        )
+        # print(
+        #     f"{name:<100} "
+        #     f"norm={param.detach().float().norm().item():.8f}"
+        # )
 
-    print("=" * 70)
+    # print("=" * 70)
 def print_all_lora_adapter_norms(model):
     print("\n" + "=" * 80)
     print("ALL LoRA ADAPTER NORMS")
@@ -3192,17 +3907,17 @@ def enable_all_lora_gradients(model):
                 matched = True
                 break
 
-    print("\n" + "=" * 70)
-    print("LORA TRAINABILITY CHECK")
-    print("=" * 70)
+    # print("\n" + "=" * 70)
+    # print("LORA TRAINABILITY CHECK")
+    # print("=" * 70)
 
-    for adapter in adapters:
-        print(
-            f"{adapter:15s}: "
-            f"{counts[adapter]:,} parameters"
-        )
+    # for adapter in adapters:
+    #     print(
+    #         f"{adapter:15s}: "
+    #         f"{counts[adapter]:,} parameters"
+    #     )
 
-    print("=" * 70)
+    # print("=" * 70)
 
 def print_adapter_gradient_stats(model):
 
@@ -3213,9 +3928,9 @@ def print_adapter_gradient_stats(model):
         "sarcasm_uk",
     ]
 
-    print("\n" + "=" * 70)
-    print("ADAPTER GRADIENT STATISTICS")
-    print("=" * 70)
+    # print("\n" + "=" * 70)
+    # print("ADAPTER GRADIENT STATISTICS")
+    # print("=" * 70)
 
     for adapter in adapters:
 
@@ -3254,15 +3969,220 @@ def print_adapter_gradient_stats(model):
             total_norm_sq ** 0.5
         )
 
-        print(
-            f"{adapter:15s} | "
-            f"norm={total_norm:.6e} | "
-            f"grad={grad_tensors} | "
-            f"missing={missing_gradients} | "
-            f"nonzero={nonzero_gradients}"
+        # print( f"{adapter:15s} | norm={total_norm:.6e} | grad={grad_tensors} | missing={missing_gradients} | nonzero={nonzero_gradients}")
+
+    # print("=" * 70)
+
+
+@torch.no_grad()
+def get_sarcasm_oof_predictions(model, dataloader):
+    """
+    Generate out-of-fold sarcasm probabilities for one validation fold.
+
+    IMPORTANT:
+    This function is only used on a fold's validation data.
+    It must NOT be used on the final valid.csv test data for
+    threshold optimization.
+    """
+
+    model.eval()
+
+    all_probs = []
+    all_labels = []
+    all_varieties = []
+
+    for batch in dataloader:
+
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask
         )
 
+        sarcasm_logits = outputs["sarcasm_logits"]
+
+        sarcasm_probs = torch.softmax(
+            sarcasm_logits,
+            dim=1
+        )[:, 1]
+
+        all_probs.append(
+            sarcasm_probs.detach().cpu().numpy()
+        )
+
+        all_labels.append(
+            batch["sarcasm_labels"].cpu().numpy()
+        )
+
+        all_varieties.append(
+            np.asarray(batch["variety"])
+        )
+
+    return (
+        np.concatenate(all_varieties),
+        np.concatenate(all_labels),
+        np.concatenate(all_probs)
+    )
+
+def optimize_sarcasm_thresholds_from_oof(
+    varieties,
+    sarcasm_labels,
+    sarcasm_positive_probs
+):
+    """
+    Find AU and UK sarcasm thresholds using ONLY OOF predictions.
+
+    The final competition/test set is never used here.
+    """
+
+    varieties = np.asarray(varieties)
+    sarcasm_labels = np.asarray(sarcasm_labels)
+    sarcasm_positive_probs = np.asarray(
+        sarcasm_positive_probs
+    )
+
+    au_mask = varieties == "en-AU"
+    uk_mask = varieties == "en-UK"
+
+    thresholds = np.arange(
+        0.20,
+        0.801,
+        0.01
+    )
+
+    best_au_threshold = 0.50
+    best_au_f1 = -1.0
+
+    best_uk_threshold = 0.50
+    best_uk_f1 = -1.0
+
+    # ============================================================
+    # AU
+    # ============================================================
+
+    au_labels = sarcasm_labels[au_mask]
+    au_probs = sarcasm_positive_probs[au_mask]
+
+    for threshold in thresholds:
+
+        predictions = (
+            au_probs >= threshold
+        ).astype(np.int64)
+
+        score = f1_score(
+            au_labels,
+            predictions,
+            average="macro",
+            zero_division=0
+        )
+
+        if score > best_au_f1:
+
+            best_au_f1 = score
+            best_au_threshold = float(threshold)
+
+    # ============================================================
+    # UK
+    # ============================================================
+
+    uk_labels = sarcasm_labels[uk_mask]
+    uk_probs = sarcasm_positive_probs[uk_mask]
+
+    for threshold in thresholds:
+
+        predictions = (
+            uk_probs >= threshold
+        ).astype(np.int64)
+
+        score = f1_score(
+            uk_labels,
+            predictions,
+            average="macro",
+            zero_division=0
+        )
+
+        if score > best_uk_f1:
+
+            best_uk_f1 = score
+            best_uk_threshold = float(threshold)
+
+    official_sarcasm_score = min(
+        best_au_f1,
+        best_uk_f1
+    )
+
+    print("\n" + "=" * 70)
+    print("OOF SARCASM THRESHOLD OPTIMIZATION")
     print("=" * 70)
+
+    print(
+        f"AU OOF threshold : {best_au_threshold:.2f}"
+    )
+
+    print(
+        f"AU OOF Macro F1  : {best_au_f1:.4f}"
+    )
+
+    print(
+        f"UK OOF threshold : {best_uk_threshold:.2f}"
+    )
+
+    print(
+        f"UK OOF Macro F1  : {best_uk_f1:.4f}"
+    )
+
+    print(
+        f"OOF official sarcasm score: "
+        f"{official_sarcasm_score:.4f}"
+    )
+
+    print("=" * 70)
+
+    return (
+        best_au_threshold,
+        best_uk_threshold
+    )
+
+def predict_sarcasm_with_dialect_thresholds(
+    varieties,
+    sarcasm_positive_probs,
+    au_threshold,
+    uk_threshold
+):
+    """
+    Apply previously learned OOF thresholds to new data.
+
+    IMPORTANT:
+    The thresholds are already fixed.
+    No labels from the new data are used.
+    """
+
+    varieties = np.asarray(varieties)
+    sarcasm_positive_probs = np.asarray(
+        sarcasm_positive_probs
+    )
+
+    predictions = np.zeros(
+        len(sarcasm_positive_probs),
+        dtype=np.int64
+    )
+
+    au_mask = varieties == "en-AU"
+    uk_mask = varieties == "en-UK"
+
+    predictions[au_mask] = (
+        sarcasm_positive_probs[au_mask]
+        >= au_threshold
+    ).astype(np.int64)
+
+    predictions[uk_mask] = (
+        sarcasm_positive_probs[uk_mask]
+        >= uk_threshold
+    ).astype(np.int64)
+
+    return predictions
 
 def main(args):
 
@@ -3278,6 +4198,10 @@ def main(args):
 
 
     df = pd.read_csv(train_path)
+    if os.path.isfile(valid_path):
+        valid_df = pd.read_csv(valid_path)
+        df = pd.concat([df, valid_df], ignore_index=True)
+
 
     print( f"Training samples: {len(df)}")
 
@@ -3331,7 +4255,7 @@ def main(args):
     # iSarcasmEval GENERAL ADAPTER PRETRAINING
     # ==================================================
 
-    if USE_ISARCASM_PRETRAINING:
+    if USE_ISARCASM_PRETRAINING or USE_REDDIT_PRETRAINING:
         pretrained_checkpoint = os.path.join( GENERAL_ADAPTER_CHECKPOINT, "best_general_adapter.pt", )
         if os.path.exists(
             pretrained_checkpoint
@@ -3350,10 +4274,13 @@ def main(args):
             )
 
         else:
+            if USE_ISARCASM_PRETRAINING:
+                sarcasm_pretrain_general_adapter()
 
-            pretrain_general_adapter()
+            if USE_REDDIT_PRETRAINING:
+                pretrain_reddit_general_adapter( )
+                
 
-   
 
     # df["stratify_group"] =  df["variety"].astype(str)+ "_" + df["sarcasm"].astype(str)
     df["stratify_group"] = df["variety"].astype(str) + "_" + df["sentiment"].astype(str)+ "_" + df["sarcasm"].astype(str)
@@ -3371,8 +4298,11 @@ def main(args):
 
     fold_scores = []
 
-  
+    oof_varieties = []
+    oof_sarcasm_labels = []
+    oof_sarcasm_probs = []
     for fold, (train_indices,val_indices) in enumerate(skf.split( df,df["stratify_group"])):
+        
 
         print( f"\n{'=' * 60}")
         print( f"FOLD {fold + 1}/{NUM_FOLDS}")
@@ -3416,7 +4346,7 @@ def main(args):
         # Initialize GENERAL LoRA from iSarcasmEval
         # --------------------------------------------------
         model.to(DEVICE)
-        if USE_ISARCASM_PRETRAINING:
+        if USE_ISARCASM_PRETRAINING or USE_REDDIT_PRETRAINING:
             initialize_sarcasm_adapters_from_pretrained(
                 model=model,
                 checkpoint_path=GENERAL_ADAPTER_CHECKPOINT,
@@ -3428,19 +4358,14 @@ def main(args):
 
             for name, param in model.named_parameters():
 
-                if (
-                    "lora_A" in name
-                    or "lora_B" in name
-                ):
-                    print(
-                        f"{name}: {param.dtype}"
-                    )
-        print(
-            "\nAvailable adapters:"
-        )
+                if ("lora_A" in name or "lora_B" in name):
+                    print(f"{name}: {param.dtype}")
+        else:
+            force_lora_parameters_to_float32(model)
 
-        print(
-            model.encoder.peft_config.keys())
+        # print("\nAvailable adapters:")
+
+        # print(model.encoder.peft_config.keys())
         
         
 
@@ -3539,6 +4464,7 @@ def main(args):
             weight_decay=WEIGHT_DECAY,
             eps=1e-6,
         )
+       
 
         
         # steps_per_epoch = (len(train_loader) // GRADIENT_ACCUMULATION_STEPS)
@@ -3692,9 +4618,9 @@ def main(args):
 
 
         for epoch in range(NUM_EPOCHS):
-            print("\n" + "=" * 70)
-            print("FINAL LoRA DTYPE CHECK")
-            print("=" * 70)
+            # print("\n" + "=" * 70)
+            # print("FINAL LoRA DTYPE CHECK")
+            # print("=" * 70)
 
             bad_dtype = []
 
@@ -3711,11 +4637,11 @@ def main(args):
                             (name, param.dtype)
                         )
 
-                    print(
-                        f"{name}: {param.dtype}"
-                    )
+                    # print(
+                    #     f"{name}: {param.dtype}"
+                    # )
 
-            print("=" * 70)
+            # print("=" * 70)
 
             if bad_dtype:
 
@@ -4064,7 +4990,29 @@ def main(args):
             checkpoint["model_state_dict"],
             strict=True,
         )
-        
+        # ============================================================
+        # GENERATE OOF PREDICTIONS FOR THIS FOLD
+        # ============================================================
+
+        fold_oof_varieties, fold_oof_labels, fold_oof_probs = (
+            get_sarcasm_oof_predictions(
+                model=model,
+                dataloader=val_loader
+            )
+        )
+
+        oof_varieties.append(
+            fold_oof_varieties
+        )
+
+        oof_sarcasm_labels.append(
+            fold_oof_labels
+        )
+
+        oof_sarcasm_probs.append(
+            fold_oof_probs
+        )
+
         if NUM_GPUS > 1:
             model = nn.DataParallel(model)
 
@@ -4079,82 +5027,92 @@ def main(args):
         f"{len(ensemble_models)} "
         f"models for ensemble."
     )
+    # ============================================================
+    # COMBINE ALL OOF PREDICTIONS
+    # ============================================================
 
-    # ==================================================
-    # Ensemble prediction
-    # ==================================================
+    oof_varieties = np.concatenate(
+        oof_varieties
+    )
+
+    oof_sarcasm_labels = np.concatenate(
+        oof_sarcasm_labels
+    )
+
+    oof_sarcasm_probs = np.concatenate(
+        oof_sarcasm_probs
+    )
+
+    print("\n" + "=" * 70)
+    print("OOF PREDICTIONS READY")
+    print("=" * 70)
+
+    print(
+        f"OOF samples: {len(oof_sarcasm_labels)}"
+    )
+
+    print(
+        f"AU samples: "
+        f"{np.sum(oof_varieties == 'en-AU')}"
+    )
+
+    print(
+        f"UK samples: "
+        f"{np.sum(oof_varieties == 'en-UK')}"
+    )
+    # ============================================================
+    # LEARN THRESHOLDS FROM OOF ONLY
+    # ============================================================
+
+    au_threshold, uk_threshold = (
+        optimize_sarcasm_thresholds_from_oof(
+            varieties=oof_varieties,
+
+            sarcasm_labels=oof_sarcasm_labels,
+
+            sarcasm_positive_probs=oof_sarcasm_probs
+        )
+    )
+    # ============================================================
+    # FINAL ENSEMBLE ON VALID.CSV
+    # ============================================================
 
     ensemble_output = predict_ensemble(
         models=ensemble_models,
         dataloader=test_loader
     )
 
-    # ==================================================
-    # Calculate official ALTA score
-    # ==================================================
 
-    final_results = evaluate_final_test(
+    # ============================================================
+    # SENTIMENT
+    # Keep normal argmax
+    # ============================================================
 
-        varieties=
-            ensemble_output["varieties"],
-
-        sentiment_labels=
-            ensemble_output["sentiment_labels"],
-
-        sentiment_predictions=
-            ensemble_output["sentiment_predictions"],
-
-        sarcasm_labels=
-            ensemble_output["sarcasm_labels"],
-
-        sarcasm_predictions=
-            ensemble_output["sarcasm_predictions"]
+    final_sentiment_predictions = (
+        ensemble_output["sentiment_predictions"]
     )
 
 
+    # ============================================================
+    # SARCASM
+    # Apply the thresholds learned from OOF
+    # ============================================================
 
-    print(
-        "\n"
-        +
-        "=" * 60
+    final_sarcasm_predictions = (
+        predict_sarcasm_with_dialect_thresholds(
+
+            varieties=ensemble_output["varieties"],
+
+            sarcasm_positive_probs=ensemble_output[
+                "sarcasm_positive_probs"
+            ],
+
+            au_threshold=au_threshold,
+
+            uk_threshold=uk_threshold
+        )
     )
-
-    print(
-        "FINAL ALTA ENSEMBLE RESULTS"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    print()
-
-    print(
-        f"f1-sentiment-en-AU: "
-        f"{final_results['f1-sentiment-en-AU']:.4f}"
-    )
-
-    print(
-        f"f1-sentiment-en-UK: "
-        f"{final_results['f1-sentiment-en-UK']:.4f}"
-    )
-
-    print(
-        f"f1-sarcasm-en-AU:   "
-        f"{final_results['f1-sarcasm-en-AU']:.4f}"
-    )
-
-    print(
-        f"f1-sarcasm-en-UK:   "
-        f"{final_results['f1-sarcasm-en-UK']:.4f}"
-    )
-
-    print()
-
-    print(
-        f"FINAL SCORE: "
-        f"{final_results['score']:.4f}"
-    )
+#########--------------
 
     # ==================================================
     # Create answer.csv
@@ -4168,17 +5126,8 @@ def main(args):
         ]
     ].copy()
 
-    answer_df["sentiment"] = (
-        ensemble_output[
-            "sentiment_predictions"
-        ]
-    )
-
-    answer_df["sarcasm"] = (
-        ensemble_output[
-            "sarcasm_predictions"
-        ]
-    )
+    answer_df["sentiment"] = final_sentiment_predictions
+    answer_df["sarcasm"] = final_sarcasm_predictions
 
     # ----------------------------------------------
     # Safety checks
