@@ -11,16 +11,7 @@ import numpy as np
 # ============================================================
 
 class ISarcasmDataset(Dataset):
-    """
-    Uses:
-        tweet       -> binary sarcastic supervision
-        sarcastic   -> binary sarcastic label
-        rephrase     -> contrastive pair with tweet
-        sarcasm      -> fine-grained sarcasm-category supervision
-
-    The 'sarcasm' category is only used when it is actually annotated.
-    Missing values are masked rather than automatically treated as 0.
-    """
+  
 
     def __init__(
         self,

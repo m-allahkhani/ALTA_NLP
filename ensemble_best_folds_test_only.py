@@ -11,31 +11,8 @@ from transformers import AutoTokenizer
 from dataset import ALTAMultiTaskDataset
 from model import DialectAwareMultiTaskDeBERTa
 
-# Use the same project-level components that produced the trained checkpoints.
-import main as project_main
 
 
-# ============================================================
-# ALTA 2026 — BEST-FOLD TEST INFERENCE ONLY
-#
-# This script DOES NOT:
-#   - run StratifiedKFold
-#   - use valid.csv
-#   - perform OOF prediction
-#   - use cross-adaptation caches
-#   - search adaptation mixes
-#   - search thresholds
-#   - train anything
-#
-# It ONLY:
-#   1) loads best_fold_1.pt
-#   2) loads best_fold_2.pt
-#   3) loads best_fold_3.pt
-#   4) predicts test.csv with native variety routing
-#   5) averages the 3 fold probabilities
-#   6) thresholds at 0.50
-#   7) saves answer.csv
-# ============================================================
 
 
 MODEL_NAME = project_main.MODEL_NAME

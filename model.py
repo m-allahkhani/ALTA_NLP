@@ -49,32 +49,6 @@ class TaskClassificationHead(nn.Module):
 
 class DialectAwareMultiTaskDeBERTa(nn.Module):
 
-    """
-    Task-independent encoder architecture.
-
-    SENTIMENT:
-        en-AU -> sentiment_au
-        en-UK -> sentiment_uk
-
-    SARCASM:
-        en-AU -> sarcasm_au
-        en-UK -> sarcasm_uk
-
-    The sentiment and sarcasm pathways therefore have completely
-    independent LoRA adapters.
-
-    The pretrained iSarcasm general adapter is NOT used directly
-    during ALTA forward passes.
-
-    Instead, its weights are copied into:
-        sarcasm_au
-        sarcasm_uk
-
-    This lets AU and UK sarcasm specialize independently while
-    preventing sarcasm pretraining from directly modifying the
-    sentiment representation.
-    """
-
     def __init__(
         self,
         model_name="microsoft/deberta-v3-base",

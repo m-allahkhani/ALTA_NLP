@@ -21,15 +21,6 @@ class RephraseContrastiveLoss(nn.Module):
         tweet_embeddings,
         rephrase_embeddings,
     ):
-        """
-        Symmetric InfoNCE.
-
-        Positive pair:
-            tweet[i] <-> rephrase[i]
-
-        Negative pairs:
-            tweet[i] <-> rephrase[j], i != j
-        """
 
         if tweet_embeddings.size(0) < 2:
             return torch.tensor(

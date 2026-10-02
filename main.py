@@ -63,7 +63,6 @@ from metrics import (
 )
 
 from focal_loss import FocalLoss
-from multi_task_loss import MultiTaskLoss
 from general_sarcasm_pretrain_model import GeneralSarcasmPretrainModel
 from rephrase_contrastive_loss import RephraseContrastiveLoss
 from ISarcasm_dataset import ISarcasmDataset

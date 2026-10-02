@@ -21,19 +21,6 @@ from peft import (
 import torch.nn.functional as F
 from mean_pooling import MeanPooling
 class GeneralSarcasmPretrainModel(nn.Module):
-    """
-    General sarcasm adaptation model.
-
-    Objectives:
-        1. Binary sarcasm classification:
-           tweet -> sarcastic
-
-        2. Rephrase contrastive learning:
-           tweet <-> non-sarcastic rephrase
-
-        3. Fine-grained sarcasm category:
-           tweet -> sarcasm category
-    """
 
     def __init__(
         self,

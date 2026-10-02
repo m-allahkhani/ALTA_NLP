@@ -1,20 +1,3 @@
-r"""evaluate.py - Evaluation script
-
-This script evaluates the predictions made by a model against the gold
-standard labels. It calculates macro-F1 for each task (sentiment, sarcasm)
-and each dialect (AU, UK) separately, producing four component scores:
-`sent-AU/UK` and `sarc-AU/UK`. To reward robustness across varieties,
-each task is scored by its weakest-performing variety:
-
-    score = ( min(sent-AU, sent-UK) + min(sarc-AU, sarc-UK) ) / 2
-
-Usage:
-    python evaluate.py <run_filepath> [gold_filepath] [output_filepath]
-
-Example:
-    python evaluate.py predictions.csv test.csv scores.txt
-"""
-
 import argparse
 import os
 import sys
