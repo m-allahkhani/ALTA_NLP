@@ -88,3 +88,5 @@ Overall, our implementation combines lightweight text preprocessing, general sar
 **7\. References**
 
 Maheshwari, S., Rajpoot, A. S., Cocarascu, O., & Mamta. (2026). _Improving Dialect Robustness in Large Language Models via LoRA and Mixture-of-Experts_. Proceedings of the 13th Workshop on NLP for Similar Languages, Varieties and Dialects, 293–303
+
+Yik Yang Tan1 , Chee‑Onn Chow,Jeevan Kanesan1 , Joon Huang Chuah1 , YongLiang Lim . (2023). _Sentiment Analysis and Sarcasm Detection using Deep Multi‑Task Learning_
