@@ -102,8 +102,7 @@ class GeneralSarcasmPretrainModel(nn.Module):
     ):
         outputs = self.encoder(
             input_ids=input_ids,
-            attention_mask=attention_mask,
-            adapter_name="general",
+            attention_mask=attention_mask
         )
 
         pooled = self.pooler(

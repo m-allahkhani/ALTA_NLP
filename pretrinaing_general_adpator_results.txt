@@ -1,0 +1,233 @@
+here is REDDIT-ONLY pretrining result:
+Epoch 1/8
+Train Loss: 0.6932
+  Binary: 0.6932
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.5839
+Validation Positive F1: 0.5924
+✓ Saved best Reddit model → checkpoints/best_general_adapter.pt
+
+Epoch 2/8
+Train Loss: 0.6818
+  Binary: 0.6818
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.5976
+Validation Positive F1: 0.5665
+✓ Saved best Reddit model → checkpoints/best_general_adapter.pt
+
+Epoch 3/8
+Train Loss: 0.6572
+  Binary: 0.6572
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.5910
+Validation Positive F1: 0.6337
+
+Epoch 4/8
+Train Loss: 0.6234
+  Binary: 0.6234
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.6455
+Validation Positive F1: 0.6455
+✓ Saved best Reddit model → checkpoints/best_general_adapter.pt
+
+Epoch 5/8
+Train Loss: 0.5972
+  Binary: 0.5972
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.6584
+Validation Positive F1: 0.6266
+✓ Saved best Reddit model → checkpoints/best_general_adapter.pt
+
+Epoch 6/8
+Train Loss: 0.5813
+  Binary: 0.5813
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.6682
+Validation Positive F1: 0.6667
+✓ Saved best Reddit model → checkpoints/best_general_adapter.pt
+
+Epoch 7/8
+Train Loss: 0.5722
+  Binary: 0.5722
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.6795
+Validation Positive F1: 0.6744
+✓ Saved best Reddit model → checkpoints/best_general_adapter.pt
+
+Epoch 8/8
+Train Loss: 0.5668
+  Binary: 0.5668
+  Rephrase: 0.0000
+  Fine sarcasm: 0.0000
+Validation Macro F1: 0.6795
+Validation Positive F1: 0.6744
+
+============================================================
+REDDIT-ONLY PRETRAINING COMPLETE
+============================================================
+Best validation Macro F1: 0.6795
+Best epoch: 7
+Training samples: 3960
+Validation samples: 440
+Checkpoint: checkpoints/best_reddit_general_adapter.pt
+
+-------------------------------------
+
+only sarcasm:
+
+Epoch 1/8
+Train Loss: 0.5485
+  Binary: 0.6781
+  Rephrase: 0.0908
+  Fine sarcasm: 0.7932
+Validation Macro F1: 0.4283
+Validation Positive F1: 0.0000
+Validation Fine Loss: 0.6402
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 2/8
+Train Loss: 0.5081
+  Binary: 0.6343
+  Rephrase: 0.0824
+  Fine sarcasm: 0.7128
+Validation Macro F1: 0.6135
+Validation Positive F1: 0.4398
+Validation Fine Loss: 0.5583
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 3/8
+Train Loss: 0.4546
+  Binary: 0.5630
+  Rephrase: 0.0884
+  Fine sarcasm: 0.6311
+Validation Macro F1: 0.6499
+Validation Positive F1: 0.4804
+Validation Fine Loss: 0.6302
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 4/8
+Train Loss: 0.4207
+  Binary: 0.5241
+  Rephrase: 0.0806
+  Fine sarcasm: 0.5739
+Validation Macro F1: 0.6610
+Validation Positive F1: 0.4744
+Validation Fine Loss: 0.7201
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 5/8
+Train Loss: 0.4082
+  Binary: 0.5112
+  Rephrase: 0.0748
+  Fine sarcasm: 0.5521
+Validation Macro F1: 0.6588
+Validation Positive F1: 0.4750
+Validation Fine Loss: 0.7065
+
+Epoch 6/8
+Train Loss: 0.4050
+  Binary: 0.5072
+  Rephrase: 0.0735
+  Fine sarcasm: 0.5486
+Validation Macro F1: 0.6513
+Validation Positive F1: 0.4533
+Validation Fine Loss: 0.7495
+
+Epoch 7/8
+Train Loss: 0.3977
+  Binary: 0.5016
+  Rephrase: 0.0626
+  Fine sarcasm: 0.5407
+Validation Macro F1: 0.6618
+Validation Positive F1: 0.4815
+Validation Fine Loss: 0.7223
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 8/8
+Train Loss: 0.3913
+  Binary: 0.4870
+  Rephrase: 0.0675
+  Fine sarcasm: 0.5483
+Validation Macro F1: 0.6444
+Validation Positive F1: 0.4487
+Validation Fine Loss: 0.7383
+
+Best validation Macro F1: 0.6618
+Best epoch: 7
+-------------------------------------
+both sarcasm dataset and reddit dataset
+
+Epoch 1/8
+Train Loss: 0.4909
+  Binary: 0.6645
+  Rephrase: 0.0303
+  Fine sarcasm: 0.5642
+Validation Macro F1: 0.4813
+Validation Positive F1: 0.1165
+Validation Fine Loss: 0.6838
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 2/8
+Train Loss: 0.4316
+  Binary: 0.5903
+  Rephrase: 0.0261
+  Fine sarcasm: 0.4728
+Validation Macro F1: 0.5463
+Validation Positive F1: 0.2364
+Validation Fine Loss: 0.6467
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 3/8
+Train Loss: 0.4015
+  Binary: 0.5504
+  Rephrase: 0.0261
+  Fine sarcasm: 0.4318
+Validation Macro F1: 0.6116
+Validation Positive F1: 0.3731
+Validation Fine Loss: 0.6733
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 4/8
+Train Loss: 0.3855
+  Binary: 0.5258
+  Rephrase: 0.0259
+  Fine sarcasm: 0.4235
+Validation Macro F1: 0.6189
+Validation Positive F1: 0.3817
+Validation Fine Loss: 0.6692
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 5/8
+Train Loss: 0.3748
+  Binary: 0.5118
+  Rephrase: 0.0225
+  Fine sarcasm: 0.4141
+Validation Macro F1: 0.6233
+Validation Positive F1: 0.3910
+Validation Fine Loss: 0.7101
+✓ Saved best model → checkpoints/best_general_adapter.pt
+
+Epoch 6/8
+Train Loss: 0.3655
+  Binary: 0.4980
+  Rephrase: 0.0288
+  Fine sarcasm: 0.3969
+Validation Macro F1: 0.6048
+Validation Positive F1: 0.3520
+Validation Fine Loss: 0.7148
+
+Epoch 7/8
+Train Loss: 0.3617
+  Binary: 0.4970
+  Rephrase: 0.0267
+  Fine sarcasm: 0.3790
+Validation Macro F1: 0.6168
+Validation Positive F1: 0.3750
+Validation Fine Loss: 0.7276

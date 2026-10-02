@@ -88,8 +88,18 @@ def parse_args():
         help="Number of cross-validation folds"
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--only_fold",
+        type=int,
+        default=None,
+        help=(
+            "If set, only this fold index (0-based) is trained. "
+            "All other folds are skipped. Example: --only_fold 2 "
+            "trains the 3rd fold only."
+        )
+    )
 
+    return parser.parse_args()
 SEED = 42
 
 train_path = f"train.csv" 
@@ -120,7 +130,7 @@ REDDIT_SARCASM_PATH_2 = "sarcasm_detection_shared_task_reddit_testing.jsonl"
 
 # Start with 2,000 Reddit samples for a controlled experiment.
 # The dataset is approximately balanced, so we take 1,000 per class.
-REDDIT_PRETRAIN_SAMPLES = 4400
+REDDIT_PRETRAIN_SAMPLES = 6200
 
 GENERAL_ADAPTER_CHECKPOINT = (
     "checkpoints/"
@@ -1151,7 +1161,7 @@ def pretrain_reddit_general_adapter(
         )
 
     reddit_df = pd.concat([reddit_df_train, reddit_df_test], ignore_index=True)
-    reddit_df = reddit_df.drop_duplicates(subset=["text"], keep="first").reset_index(drop=True)
+   # reddit_df = reddit_df.drop_duplicates(subset=["context"], keep="first").reset_index(drop=True)
 
     print("\n" + "=" * 60)
     print("REDDIT-ONLY GENERAL ADAPTER PRETRAINING")
@@ -4302,7 +4312,22 @@ def main(args):
     oof_sarcasm_labels = []
     oof_sarcasm_probs = []
     for fold, (train_indices,val_indices) in enumerate(skf.split( df,df["stratify_group"])):
-        
+
+    # ------------------------------------------------------------
+    # Skip folds we already trained (checkpoints already exist).
+    # ------------------------------------------------------------
+        if args.only_fold is not None and fold != args.only_fold:
+            print(
+                f"\n{'=' * 60}"
+            )
+            print(
+                f"SKIPPING FOLD {fold + 1}/{NUM_FOLDS} "
+                f"(checkpoint already exists)"
+            )
+            print(
+                f"{'=' * 60}"
+            )
+            continue
 
         print( f"\n{'=' * 60}")
         print( f"FOLD {fold + 1}/{NUM_FOLDS}")
@@ -4783,9 +4808,7 @@ def main(args):
                     f"epoch(s)."
                 )
 
-            # ----------------------------------------------
-            # Early stopping
-            # ----------------------------------------------
+            
 
             if (
                 epochs_without_improvement
@@ -4837,360 +4860,7 @@ def main(args):
 
             torch.cuda.empty_cache()
 
-    print(
-        "\n"
-        +
-        "=" * 60
-    )
 
-    print(
-        "CROSS-VALIDATION RESULTS"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        f"Fold scores: "
-        f"{fold_scores}"
-    )
-
-    print(
-        f"Mean: "
-        f"{np.mean(fold_scores):.4f}"
-    )
-
-    print(
-        f"Std: "
-        f"{np.std(fold_scores):.4f}"
-    )
-
-    # ==================================================
-    # FINAL ENSEMBLE EVALUATION
-    # ==================================================
-
-    print(
-        "\n"
-        +
-        "=" * 60
-    )
-
-    print(
-        "FINAL ENSEMBLE EVALUATION"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    # ----------------------------------------------
-    # Load separate evaluation dataset
-    # ----------------------------------------------
-
-    test_df = pd.read_csv(test_path)
-
-    original_test_text = (
-        test_df["text"].astype(str).copy()
-    )
-
-    test_df["text"] = (
-        test_df["text"]
-        .apply(preprocess_text)
-    )
-
-    test_changed_mask = (
-        original_test_text != test_df["text"]
-    )
-
-    print(
-        "\nValidation/Test preprocessing:"
-    )
-
-    print(
-        f"Total samples:     {len(test_df)}"
-    )
-
-    print(
-        f"Changed samples:   {test_changed_mask.sum()}"
-    )
-
-    print(
-        f"Changed percentage: "
-        f"{test_changed_mask.mean() * 100:.2f}%"
-    )
-    print(
-        f"Evaluation samples: "
-        f"{len(test_df)}"
-    )
-
-    print(
-        "\nDialect distribution:"
-    )
-
-    print(
-        test_df["variety"].value_counts()
-    )
-
-
-    test_dataset = ALTAMultiTaskDataset(
-        dataframe=test_df,
-        tokenizer=tokenizer,
-        max_length=MAX_LENGTH
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True
-    )
-
-    # ==================================================
-    # Load ALL fold checkpoints
-    # ==================================================
-
-    ensemble_models = []
-
-    for fold in range(NUM_FOLDS):
-
-        checkpoint_path = os.path.join( ALTA_CHECKPOINT_DIR, f"best_fold_{fold + 1}.pt", )
-
-        if not os.path.exists(
-            checkpoint_path
-        ):
-
-            raise FileNotFoundError(
-                f"Required checkpoint not found: "
-                f"{checkpoint_path}"
-            )
-
-        print(
-            f"Loading Fold {fold + 1}: "
-            f"{checkpoint_path}"
-        )
-
-        model = DialectAwareMultiTaskDeBERTa(
-            model_name=MODEL_NAME,
-            lora_r=8,
-            lora_alpha=16,
-            lora_dropout=0.05,
-            dropout=0.1,)
-
-        model.to(DEVICE)
-
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location=DEVICE,
-            weights_only=False,
-        )
-
-        model.load_state_dict(
-            checkpoint["model_state_dict"],
-            strict=True,
-        )
-        # ============================================================
-        # GENERATE OOF PREDICTIONS FOR THIS FOLD
-        # ============================================================
-
-        fold_oof_varieties, fold_oof_labels, fold_oof_probs = (
-            get_sarcasm_oof_predictions(
-                model=model,
-                dataloader=val_loader
-            )
-        )
-
-        oof_varieties.append(
-            fold_oof_varieties
-        )
-
-        oof_sarcasm_labels.append(
-            fold_oof_labels
-        )
-
-        oof_sarcasm_probs.append(
-            fold_oof_probs
-        )
-
-        if NUM_GPUS > 1:
-            model = nn.DataParallel(model)
-
-        model.eval()
-
-        ensemble_models.append(
-            model
-        )
-
-    print(
-        f"\nLoaded "
-        f"{len(ensemble_models)} "
-        f"models for ensemble."
-    )
-    # ============================================================
-    # COMBINE ALL OOF PREDICTIONS
-    # ============================================================
-
-    oof_varieties = np.concatenate(
-        oof_varieties
-    )
-
-    oof_sarcasm_labels = np.concatenate(
-        oof_sarcasm_labels
-    )
-
-    oof_sarcasm_probs = np.concatenate(
-        oof_sarcasm_probs
-    )
-
-    print("\n" + "=" * 70)
-    print("OOF PREDICTIONS READY")
-    print("=" * 70)
-
-    print(
-        f"OOF samples: {len(oof_sarcasm_labels)}"
-    )
-
-    print(
-        f"AU samples: "
-        f"{np.sum(oof_varieties == 'en-AU')}"
-    )
-
-    print(
-        f"UK samples: "
-        f"{np.sum(oof_varieties == 'en-UK')}"
-    )
-    # ============================================================
-    # LEARN THRESHOLDS FROM OOF ONLY
-    # ============================================================
-
-    au_threshold, uk_threshold = (
-        optimize_sarcasm_thresholds_from_oof(
-            varieties=oof_varieties,
-
-            sarcasm_labels=oof_sarcasm_labels,
-
-            sarcasm_positive_probs=oof_sarcasm_probs
-        )
-    )
-    # ============================================================
-    # FINAL ENSEMBLE ON VALID.CSV
-    # ============================================================
-
-    ensemble_output = predict_ensemble(
-        models=ensemble_models,
-        dataloader=test_loader
-    )
-
-
-    # ============================================================
-    # SENTIMENT
-    # Keep normal argmax
-    # ============================================================
-
-    final_sentiment_predictions = (
-        ensemble_output["sentiment_predictions"]
-    )
-
-
-    # ============================================================
-    # SARCASM
-    # Apply the thresholds learned from OOF
-    # ============================================================
-
-    final_sarcasm_predictions = (
-        predict_sarcasm_with_dialect_thresholds(
-
-            varieties=ensemble_output["varieties"],
-
-            sarcasm_positive_probs=ensemble_output[
-                "sarcasm_positive_probs"
-            ],
-
-            au_threshold=au_threshold,
-
-            uk_threshold=uk_threshold
-        )
-    )
-#########--------------
-
-    # ==================================================
-    # Create answer.csv
-    # ==================================================
-
-    answer_df = test_df[
-        [
-            "source",
-            "variety",
-            "text"
-        ]
-    ].copy()
-
-    answer_df["sentiment"] = final_sentiment_predictions
-    answer_df["sarcasm"] = final_sarcasm_predictions
-
-    # ----------------------------------------------
-    # Safety checks
-    # ----------------------------------------------
-
-    if len(answer_df) != len(test_df):
-
-        raise RuntimeError(
-            "Prediction count does not match "
-            "test dataset size."
-        )
-
-    if not (
-        answer_df["variety"].values
-        ==
-        test_df["variety"].values
-    ).all():
-
-        raise RuntimeError(
-            "Dialect order was changed."
-        )
-
-    if not (
-        answer_df["text"].values
-        ==
-        test_df["text"].values
-    ).all():
-
-        raise RuntimeError(
-            "Text order was changed."
-        )
-
-    # ----------------------------------------------
-    # Save
-    # ----------------------------------------------
-
-    answer_path = "answer.csv"
-
-    answer_df.to_csv(
-        answer_path,
-        index=False
-    )
-
-    print(
-        "\n"
-        +
-        "=" * 60
-    )
-
-    print(
-        f"Saved submission file:"
-    )
-
-    print(
-        os.path.abspath(
-            answer_path
-        )
-    )
-
- 
-
-
-    
 
 if __name__ == "__main__":
     args = parse_args()
